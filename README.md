@@ -59,10 +59,10 @@ npm run dev
 
 ## GitHub Actionsの設定
 
-GitHubリポジトリの **Settings → Secrets and variables → Actions** に、次のRepository secretsを登録します。
+GitHubリポジトリの **Settings → Secrets and variables → Actions** に、次のRepository secretを登録します。
 
 - `CLOUDFLARE_API_TOKEN`: Workers Scriptsの編集とD1の編集権限を持つAPIトークン
-- `CLOUDFLARE_ACCOUNT_ID`: CloudflareのアカウントID
+- Cloudflare Account IDはWorkflowに設定済みです。別アカウントへ移す場合だけ `.github/workflows/deploy.yml` を変更してください。
 
 以後は `main` ブランチへのpushで、型チェック、D1マイグレーション、デプロイが自動実行されます。
 
