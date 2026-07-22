@@ -3,7 +3,7 @@
 :root { font-family: 'DM Sans', 'Noto Sans JP', sans-serif; color: #262821; background: #f6f4ee; font-synthesis: none; --ink: #262821; --muted: #77796f; --line: #deddd5; --paper: #fffefa; --green: #58634a; --green-dark: #414b36; }
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; min-height: 100vh; overscroll-behavior-y: none; -webkit-tap-highlight-color: transparent; }
-button, input, textarea, select { font: inherit; }
+button, input, textarea, select { font: inherit; touch-action: manipulation; }
 button { color: inherit; }
 .app-shell { min-height: 100vh; display: flex; }
 .sidebar { width: 254px; position: fixed; inset: 0 auto 0 0; padding: 30px 20px 22px; background: #edebe3; border-right: 1px solid #d9d7ce; display: flex; flex-direction: column; z-index: 20; }
@@ -144,6 +144,12 @@ button { color: inherit; }
   .check-button { width: 26px; height: 26px; }
   .item-row { grid-template-columns: 28px 1fr 40px; gap: 11px; }
   .more-button { width: 40px; height: 40px; margin-top: -6px; }
+  .search-wrap input,
+  .quick-add input,
+  .field input,
+  .field textarea,
+  .field select,
+  .inline-create input { font-size: 16px; }
 }
 @media (max-width: 520px) {
   .menu-button { display: none; }
