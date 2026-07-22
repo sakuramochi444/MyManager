@@ -1,4 +1,4 @@
-const CACHE = 'mymanager-v2';
+const CACHE = 'mymanager-v3';
 const SHELL = ['/', '/manifest.webmanifest', '/icons/icon.svg'];
 
 self.addEventListener('install', (event) => {
@@ -31,4 +31,25 @@ self.addEventListener('fetch', (event) => {
     await cache.put(request, cacheResponse);
     return response;
   })());
+});
+
+self.addEventListener('push', (event) => {
+  event.waitUntil(clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windows) => {
+    if (windows.some((client) => client.visibilityState === 'visible')) return;
+    return self.registration.showNotification('MyManager', {
+      body: '予定していたタスクの時間です。今日の一歩を進めましょう。',
+      icon: '/icons/icon.svg',
+      badge: '/icons/icon.svg',
+      tag: 'mymanager-reminder',
+      data: { url: '/' },
+    });
+  }));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windows) => {
+    const existing = windows.find((client) => 'focus' in client);
+    return existing ? existing.focus() : clients.openWindow(event.notification.data?.url || '/');
+  }));
 });

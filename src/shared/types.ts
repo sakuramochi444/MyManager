@@ -9,11 +9,32 @@ export interface Subtask {
   title: string;
   completed: number;
   sortOrder: number;
+  dueDate: string | null;
 }
 
 export interface SubtaskInput {
   title: string;
   completed?: boolean;
+  dueDate?: string | null;
+}
+
+export type NoteColor = 'sage' | 'blue' | 'amber' | 'rose';
+
+export interface Note {
+  id: number;
+  title: string;
+  content: string;
+  color: NoteColor;
+  pinned: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NoteInput {
+  title: string;
+  content?: string;
+  color?: NoteColor;
+  pinned?: boolean;
 }
 
 export interface Item {

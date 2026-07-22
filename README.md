@@ -36,6 +36,9 @@
 - 月間カレンダーから期限を確認し、日付を指定してタスクを追加
 - タイトルだけですぐ登録できるクイック追加
 - タスクを小さな作業へ分解し、一覧上でも完了操作できるサブタスク
+- サブタスクの期限設定、一覧内追加・名称変更・削除、ドラッグ＆ドロップ
+- タスクをドラッグ＆ドロップして並べ替え
+- 検索・固定・色分けに対応した独立メモ
 - 期限、優先度、カテゴリ、プロジェクト、メモの設定
 - 毎日・毎週・毎月の繰り返しタスク
 - 「いつかやりたいこと」と通常タスクの分離
@@ -43,7 +46,9 @@
 - 設定タブからカテゴリ、プロジェクト、表示テーマ、通知、データを管理
 - 完了状況のサマリーと完了済み項目の一括整理
 - 完了・削除操作を直後に取り消せるUndo
-- 通知日時の設定とサブタスクを含むJSONバックアップ・復元
+- 通知日時の設定とサブタスク・メモを含むJSONバックアップ・復元
+- Service WorkerとWeb Pushによるバックグラウンド通知
+- 1日の完了目標、連続達成日数、目標達成時の演出
 - ゴミ箱からの復元、個別の完全削除、ゴミ箱を空にする操作
 - PWAとしてスマートフォンのホーム画面へ追加
 
@@ -69,6 +74,7 @@ iOSで入力欄が自動拡大されないよう文字サイズを16px以上に�
 - Cloudflare D1によるSQLite互換のデータ永続化
 - D1マイグレーションによるスキーマ変更の管理
 - タスク完了時に次回分を生成する繰り返し処理
+- Cron TriggerとVAPID認証を利用したWeb Push通知
 - 操作直後に画面へ反映し、失敗時に戻すOptimistic UI
 - APIをキャッシュ対象外にしたService Worker設計
 - GitHubの`main`へのPushを起点とした自動マイグレーション・デプロイ
@@ -82,6 +88,9 @@ flowchart LR
     Worker --> UI[React Static Assets]
     Worker --> API[Hono API]
     API --> D1[(Cloudflare D1)]
+    Cron[Cloudflare Cron] --> API
+    API --> Push[Web Push Service]
+    Push --> User
     GitHub[GitHub main] --> Actions[GitHub Actions]
     Actions --> Migration[D1 Migration]
     Actions --> Worker
@@ -142,6 +151,7 @@ npm run dev
 | `npm run build` | 本番用にビルド |
 | `npm run db:migrate:local` | ローカルD1へマイグレーションを適用 |
 | `npm run db:migrate:remote` | 本番D1へマイグレーションを適用 |
+| `npm run push:keys` | Web Push用VAPID鍵を生成 |
 | `npm run deploy` | Cloudflareへデプロイ |
 
 ## CI/CD
@@ -154,3 +164,15 @@ GitHub Actionsは`main`ブランチへのPushを検知し、次の順序で本�
 4. Cloudflare Workersへのデプロイ
 
 リポジトリのActions Secretには、Workers ScriptsとD1の編集権限を持つ`CLOUDFLARE_API_TOKEN`を設定します。
+
+### バックグラウンド通知の初期設定
+
+Web Pushでは、送信元を証明するVAPID鍵を一度だけ設定します。
+
+```bash
+npm run push:keys
+```
+
+表示されたJSONをGitHub Actions Secretの`VAPID_PRIVATE_JWK`へ保存します。`VAPID_SUBJECT`には、連絡先として`mailto:your-address@example.com`または管理しているHTTPS URLを設定します。次回のPush時にActionsがCloudflare Worker Secretへ安全に登録します。
+
+デプロイ後、「設定 → 通知 → バックグラウンド通知」から端末ごとに有効化できます。iPhone/iPadでは、ホーム画面へ追加したPWAから設定してください。
