@@ -33,16 +33,18 @@ import {
   Target,
   Palette,
   Trash2,
+  Upload,
+  RotateCcw,
   Undo2,
   X,
 } from 'lucide-react';
 import type { Category, Item, ItemInput, ItemKind, ItemUpdateResult, Priority, Project, Recurrence, SubtaskInput } from '../shared/types';
 
-type View = 'dashboard' | 'calendar' | 'today' | 'upcoming' | 'overdue' | 'tasks' | 'wishes' | 'done' | 'settings';
+type View = 'dashboard' | 'calendar' | 'today' | 'upcoming' | 'overdue' | 'tasks' | 'wishes' | 'done' | 'trash' | 'settings';
 type Sort = 'smart' | 'due' | 'priority' | 'created';
 type Accent = 'sage' | 'blue' | 'terracotta';
 type Density = 'comfortable' | 'compact';
-interface Preferences { defaultView: Exclude<View, 'settings'>; accent: Accent; density: Density }
+interface Preferences { defaultView: Exclude<View, 'settings' | 'trash'>; accent: Accent; density: Density }
 
 const defaultPreferences: Preferences = { defaultView: 'today', accent: 'sage', density: 'comfortable' };
 const accentColors: Record<Accent, { base: string; dark: string }> = {
@@ -65,6 +67,7 @@ const views: { id: View; label: string; icon: typeof Circle }[] = [
   { id: 'tasks', label: 'すべてのタスク', icon: LayoutList },
   { id: 'wishes', label: 'やりたいこと', icon: Sparkles },
   { id: 'done', label: '完了済み', icon: CheckCircle2 },
+  { id: 'trash', label: 'ゴミ箱', icon: Trash2 },
   { id: 'settings', label: '設定', icon: SettingsIcon },
 ];
 
@@ -77,6 +80,7 @@ const viewCopy: Record<View, { title: string; subtitle: string }> = {
   tasks: { title: 'すべてのタスク', subtitle: '予定していることをまとめて確認できます。' },
   wishes: { title: 'やりたいこと', subtitle: 'いつか叶えたいことを、忘れない場所へ。' },
   done: { title: '完了済み', subtitle: '積み重ねてきた成果です。' },
+  trash: { title: 'ゴミ箱', subtitle: '削除した項目を復元したり、完全に削除できます。' },
   settings: { title: '設定', subtitle: '自分の使い方に合わせて、MyManagerを整えます。' },
 };
 
@@ -106,6 +110,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 export function App() {
   const [preferences, setPreferences] = useState<Preferences>(loadPreferences);
   const [items, setItems] = useState<Item[]>([]);
+  const [trashedItems, setTrashedItems] = useState<Item[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [view, setView] = useState<View>(() => loadPreferences().defaultView);
@@ -125,9 +130,10 @@ export function App() {
   const pendingDelete = useRef<{ item: Item; timer: number } | null>(null);
 
   useEffect(() => {
-    Promise.all([request<Item[]>('/api/items'), request<Category[]>('/api/categories'), request<Project[]>('/api/projects')])
-      .then(([nextItems, nextCategories, nextProjects]) => {
+    Promise.all([request<Item[]>('/api/items'), request<Item[]>('/api/trash'), request<Category[]>('/api/categories'), request<Project[]>('/api/projects')])
+      .then(([nextItems, nextTrash, nextCategories, nextProjects]) => {
         setItems(nextItems);
+        setTrashedItems(nextTrash);
         setCategories(nextCategories);
         setProjects(nextProjects);
       })
@@ -199,8 +205,9 @@ export function App() {
     tasks: items.filter((item) => item.status === 'open' && item.kind === 'task').length,
     wishes: items.filter((item) => item.status === 'open' && item.kind === 'wish').length,
     done: items.filter((item) => item.status === 'done').length,
+    trash: trashedItems.length,
     settings: 0,
-  }), [items]);
+  }), [items, trashedItems]);
 
   async function createItem(input: ItemInput) {
     try {
@@ -285,10 +292,11 @@ export function App() {
   }
 
   async function clearCompleted() {
-    if (!window.confirm('完了済みの項目をすべて削除しますか？')) return;
+    if (!window.confirm('完了済みの項目をすべてゴミ箱へ移動しますか？')) return;
     try {
       await request<{ deleted: number }>('/api/items?status=done', { method: 'DELETE' });
       setItems((current) => current.filter((item) => item.status !== 'done'));
+      setTrashedItems(await request<Item[]>('/api/trash'));
     } catch (reason) { setError((reason as Error).message); }
   }
 
@@ -317,7 +325,7 @@ export function App() {
         void (async () => {
           try {
             const reopened = await request<ItemUpdateResult>(`/api/items/${item.id}`, { method: 'PATCH', body: JSON.stringify({ status: 'open' }) });
-            if (result.nextItem) await request<void>(`/api/items/${result.nextItem.id}`, { method: 'DELETE' });
+            if (result.nextItem) await request<void>(`/api/items/${result.nextItem.id}?permanent=true`, { method: 'DELETE' });
             setItems((current) => current.filter((candidate) => candidate.id !== result.nextItem?.id).map((candidate) => candidate.id === item.id ? reopened.item : candidate));
           } catch (reason) { setError((reason as Error).message); }
         })();
@@ -328,15 +336,33 @@ export function App() {
     }
   }
 
+  async function toggleSubtask(item: Item, subtaskId: number) {
+    const previous = item;
+    const subtasks = item.subtasks.map((subtask) => ({ title: subtask.title, completed: subtask.id === subtaskId ? !subtask.completed : Boolean(subtask.completed) }));
+    setItems((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, subtasks: candidate.subtasks.map((subtask) => subtask.id === subtaskId ? { ...subtask, completed: subtask.completed ? 0 : 1 } : subtask) } : candidate));
+    try {
+      const result = await request<ItemUpdateResult>(`/api/items/${item.id}`, { method: 'PATCH', body: JSON.stringify({ subtasks }) });
+      setItems((current) => current.map((candidate) => candidate.id === item.id ? result.item : candidate));
+    } catch (reason) {
+      setItems((current) => current.map((candidate) => candidate.id === item.id ? previous : candidate));
+      setError((reason as Error).message);
+    }
+  }
+
+  async function sendToTrash(item: Item) {
+    const trashed = await request<Item>(`/api/items/${item.id}`, { method: 'DELETE' });
+    setTrashedItems((current) => [trashed, ...current.filter((candidate) => candidate.id !== trashed.id)]);
+  }
+
   function removeItem(item: Item) {
     if (pendingDelete.current) {
       window.clearTimeout(pendingDelete.current.timer);
-      void request<void>(`/api/items/${pendingDelete.current.item.id}`, { method: 'DELETE' }).catch((reason: Error) => setError(reason.message));
+      void sendToTrash(pendingDelete.current.item).catch((reason: Error) => setError(reason.message));
       pendingDelete.current = null;
     }
     setItems((current) => current.filter((candidate) => candidate.id !== item.id));
     const timer = window.setTimeout(() => {
-      void request<void>(`/api/items/${item.id}`, { method: 'DELETE' }).catch((reason: Error) => {
+      void sendToTrash(item).catch((reason: Error) => {
         setItems((current) => [item, ...current]);
         setError(reason.message);
       });
@@ -350,6 +376,48 @@ export function App() {
         setItems((current) => [item, ...current]);
       }
     });
+  }
+
+  async function restoreTrashItem(item: Item) {
+    try {
+      const restored = await request<Item>(`/api/items/${item.id}/restore`, { method: 'POST' });
+      setTrashedItems((current) => current.filter((candidate) => candidate.id !== item.id));
+      setItems((current) => [restored, ...current]);
+    } catch (reason) { setError((reason as Error).message); }
+  }
+
+  async function permanentlyDelete(item: Item) {
+    if (!window.confirm(`「${item.title}」を完全に削除しますか？\nこの操作は元に戻せません。`)) return;
+    try {
+      await request<void>(`/api/items/${item.id}?permanent=true`, { method: 'DELETE' });
+      setTrashedItems((current) => current.filter((candidate) => candidate.id !== item.id));
+    } catch (reason) { setError((reason as Error).message); }
+  }
+
+  async function emptyTrash() {
+    if (!trashedItems.length || !window.confirm('ゴミ箱を空にしますか？\nこの操作は元に戻せません。')) return;
+    try {
+      await request<{ deleted: number }>('/api/trash', { method: 'DELETE' });
+      setTrashedItems([]);
+    } catch (reason) { setError((reason as Error).message); }
+  }
+
+  async function restoreBackup(file: File) {
+    if (!window.confirm(`「${file.name}」から復元しますか？\n現在のデータは復元前バックアップとして自動保存されます。`)) return;
+    try {
+      const backupResponse = await fetch('/api/export');
+      if (!backupResponse.ok) throw new Error('復元前バックアップの作成に失敗しました。');
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(await backupResponse.blob());
+      link.download = `mymanager-before-restore-${localDate()}.json`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+      const data = JSON.parse(await file.text()) as unknown;
+      await request('/api/import', { method: 'POST', body: JSON.stringify(data) });
+      const [nextItems, nextTrash, nextCategories, nextProjects] = await Promise.all([request<Item[]>('/api/items'), request<Item[]>('/api/trash'), request<Category[]>('/api/categories'), request<Project[]>('/api/projects')]);
+      setItems(nextItems); setTrashedItems(nextTrash); setCategories(nextCategories); setProjects(nextProjects);
+      window.alert('バックアップを復元しました。');
+    } catch (reason) { setError(reason instanceof SyntaxError ? 'JSONファイルの形式が正しくありません。' : (reason as Error).message); }
   }
 
   function navigate(next: View) {
@@ -396,8 +464,8 @@ export function App() {
       <main className="main">
         <header className="topbar">
           <button className="icon-button menu-button" onClick={() => setSidebarOpen(true)} aria-label="メニュー"><Menu size={21} /></button>
-          {!['settings', 'dashboard', 'calendar'].includes(view) ? <div className="search-wrap"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="タスクを検索..." aria-label="検索" />{query && <button onClick={() => setQuery('')} aria-label="検索をクリア"><X size={15} /></button>}</div> : <div className="topbar-context">{view === 'settings' ? <SettingsIcon size={17} /> : view === 'calendar' ? <CalendarDays size={17} /> : <BarChart3 size={17} />}{view === 'settings' ? '環境設定' : view === 'calendar' ? '月間予定' : '全体サマリー'}</div>}
-          {view !== 'settings' && <div className="top-actions"><a className="export-button" href="/api/export" download title="データを書き出す"><Download size={17} /></a><button className="add-button" onClick={() => openNew()}><Plus size={18} /><span>新しく追加</span></button></div>}
+          {!['settings', 'dashboard', 'calendar', 'trash'].includes(view) ? <div className="search-wrap"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="タスクを検索..." aria-label="検索" />{query && <button onClick={() => setQuery('')} aria-label="検索をクリア"><X size={15} /></button>}</div> : <div className="topbar-context">{view === 'settings' ? <SettingsIcon size={17} /> : view === 'calendar' ? <CalendarDays size={17} /> : view === 'trash' ? <Trash2 size={17} /> : <BarChart3 size={17} />}{view === 'settings' ? '環境設定' : view === 'calendar' ? '月間予定' : view === 'trash' ? '削除済み' : '全体サマリー'}</div>}
+          {!['settings', 'trash'].includes(view) && <div className="top-actions"><a className="export-button" href="/api/export" download title="データを書き出す"><Download size={17} /></a><button className="add-button" onClick={() => openNew()}><Plus size={18} /><span>新しく追加</span></button></div>}
         </header>
 
         <section className="content">
@@ -406,7 +474,7 @@ export function App() {
             <div className="date-card"><CalendarDays size={18} /><span>{new Intl.DateTimeFormat('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }).format(new Date())}</span></div>
           </div>
 
-          {view === 'dashboard' ? <DashboardPanel items={items} projects={projects} onNavigate={navigate} onEdit={openEdit} /> : view === 'calendar' ? <CalendarPanel items={items} onAddDate={openNew} onEdit={openEdit} /> : view === 'settings' ? <SettingsPanel categories={categories} projects={projects} preferences={preferences} completedCount={counts.done} onPreferencesChange={setPreferences} onCreateCategory={createCategory} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onCreateProject={async (name, color) => { await createProject(name, color); }} onUpdateProject={updateProject} onDeleteProject={deleteProject} onClearCompleted={clearCompleted} /> : <>
+          {view === 'dashboard' ? <DashboardPanel items={items} projects={projects} onNavigate={navigate} onEdit={openEdit} /> : view === 'calendar' ? <CalendarPanel items={items} onAddDate={openNew} onEdit={openEdit} /> : view === 'trash' ? <TrashPanel items={trashedItems} onRestore={restoreTrashItem} onDelete={permanentlyDelete} onEmpty={emptyTrash} /> : view === 'settings' ? <SettingsPanel categories={categories} projects={projects} preferences={preferences} completedCount={counts.done} trashCount={counts.trash} onPreferencesChange={setPreferences} onCreateCategory={createCategory} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onCreateProject={async (name, color) => { await createProject(name, color); }} onUpdateProject={updateProject} onDeleteProject={deleteProject} onClearCompleted={clearCompleted} onOpenTrash={() => navigate('trash')} onRestoreBackup={restoreBackup} /> : <>
           <div className="summary-strip" aria-label="進捗サマリー">
             <button onClick={() => navigate('today')}><span>今日</span><strong>{counts.today}</strong></button>
             <button onClick={() => navigate('upcoming')}><span>今後7日</span><strong>{counts.upcoming}</strong></button>
@@ -420,7 +488,7 @@ export function App() {
             <div className="list-header"><span>{visibleItems.length}件</span>{view === 'done' ? <button className="clear-done" onClick={clearCompleted}><Trash2 size={14} />すべて削除</button> : <span className="sort-label"><span>整理済み</span><ChevronDown size={15} /></span>}</div>
             {loading ? <LoadingRows /> : visibleItems.length ? (
               <div className="item-list">
-                {visibleItems.map((item) => <ItemRow key={item.id} item={item} onToggle={toggleItem} onRemove={removeItem} onEdit={openEdit} />)}
+                {visibleItems.map((item) => <ItemRow key={item.id} item={item} onToggle={toggleItem} onToggleSubtask={toggleSubtask} onRemove={removeItem} onEdit={openEdit} />)}
               </div>
             ) : <EmptyState view={view} hasQuery={Boolean(query)} onAdd={openNew} />}
           </div>
@@ -437,7 +505,7 @@ export function App() {
         ))}
       </nav>
 
-      {view !== 'settings' && <button className="mobile-fab" onClick={() => openNew()} aria-label="新しい項目を追加"><Plus size={24} /></button>}
+      {!['settings', 'trash'].includes(view) && <button className="mobile-fab" onClick={() => openNew()} aria-label="新しい項目を追加"><Plus size={24} /></button>}
       {composerOpen && <Composer categories={categories} projects={projects} initialItem={editingItem} defaultKind={view === 'wishes' ? 'wish' : 'task'} defaultDate={composerDate ?? (view === 'today' ? localDate() : null)} onClose={() => { setComposerOpen(false); setEditingItem(null); setComposerDate(null); }} onSubmit={editingItem ? updateItem : createItem} onCreateProject={createProject} />}
       {undoNotice && <div className="undo-toast" role="status"><span>{undoNotice.message}</span><button onClick={performUndo}><Undo2 size={15} />元に戻す</button></div>}
       {error && <div className="toast" role="alert"><span>{error}</span><button onClick={() => setError(null)}><X size={16} /></button></div>}
@@ -539,11 +607,19 @@ function DashboardEmpty({ icon, text }: { icon: React.ReactNode; text: string })
   return <div className="dashboard-empty"><span>{icon}</span><p>{text}</p></div>;
 }
 
-function SettingsPanel({ categories, projects, preferences, completedCount, onPreferencesChange, onCreateCategory, onUpdateCategory, onDeleteCategory, onCreateProject, onUpdateProject, onDeleteProject, onClearCompleted }: {
+function TrashPanel({ items, onRestore, onDelete, onEmpty }: { items: Item[]; onRestore: (item: Item) => Promise<void>; onDelete: (item: Item) => Promise<void>; onEmpty: () => Promise<void> }) {
+  return <section className="trash-card">
+    <div className="trash-toolbar"><span>{items.length}件</span><button disabled={!items.length} onClick={onEmpty}><Trash2 size={14} />ゴミ箱を空にする</button></div>
+    {items.length ? <div className="trash-list">{items.map((item) => <article key={item.id}><span className="trash-icon"><Trash2 size={15} /></span><div><strong>{item.title}</strong><small>{item.deletedAt ? `${new Intl.DateTimeFormat('ja-JP', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(item.deletedAt.replace(' ', 'T') + 'Z'))} に削除` : '削除済み'}</small></div><button className="restore-button" onClick={() => void onRestore(item)}><RotateCcw size={14} />復元</button><button className="permanent-button" onClick={() => void onDelete(item)}><Trash2 size={14} />完全削除</button></article>)}</div> : <div className="trash-empty"><Trash2 size={27} /><h2>ゴミ箱は空です</h2><p>削除した項目はここに移動します。</p></div>}
+  </section>;
+}
+
+function SettingsPanel({ categories, projects, preferences, completedCount, trashCount, onPreferencesChange, onCreateCategory, onUpdateCategory, onDeleteCategory, onCreateProject, onUpdateProject, onDeleteProject, onClearCompleted, onOpenTrash, onRestoreBackup }: {
   categories: Category[];
   projects: Project[];
   preferences: Preferences;
   completedCount: number;
+  trashCount: number;
   onPreferencesChange: React.Dispatch<React.SetStateAction<Preferences>>;
   onCreateCategory: (name: string, color: string) => Promise<void>;
   onUpdateCategory: (category: Category) => Promise<void>;
@@ -552,6 +628,8 @@ function SettingsPanel({ categories, projects, preferences, completedCount, onPr
   onUpdateProject: (project: Project) => Promise<void>;
   onDeleteProject: (project: Project) => Promise<void>;
   onClearCompleted: () => Promise<void>;
+  onOpenTrash: () => void;
+  onRestoreBackup: (file: File) => Promise<void>;
 }) {
   const [categoryName, setCategoryName] = useState('');
   const [categoryColor, setCategoryColor] = useState('#657153');
@@ -606,7 +684,7 @@ function SettingsPanel({ categories, projects, preferences, completedCount, onPr
 
       <section className="settings-card">
         <div className="settings-card-heading"><span><Database size={18} /></span><div><h2>データ管理</h2><p>バックアップと整理</p></div></div>
-        <div className="settings-actions"><a href="/api/export" download><Download size={16} /><span><strong>JSONを書き出す</strong><small>すべてのデータをバックアップ</small></span></a><button className="danger-action" disabled={!completedCount} onClick={onClearCompleted}><Trash2 size={16} /><span><strong>完了済みを削除</strong><small>{completedCount}件の完了データ</small></span></button></div>
+        <div className="settings-actions"><a href="/api/export" download><Download size={16} /><span><strong>JSONを書き出す</strong><small>サブタスクを含むすべてのデータ</small></span></a><label className="restore-action"><Upload size={16} /><span><strong>バックアップから復元</strong><small>復元前の現データも自動保存</small></span><input type="file" accept="application/json,.json" onChange={(event) => { const file = event.target.files?.[0]; if (file) void onRestoreBackup(file); event.target.value = ''; }} /></label><button onClick={onOpenTrash}><Trash2 size={16} /><span><strong>ゴミ箱を開く</strong><small>{trashCount}件の削除済みデータ</small></span></button><button className="danger-action" disabled={!completedCount} onClick={onClearCompleted}><Trash2 size={16} /><span><strong>完了済みをゴミ箱へ</strong><small>{completedCount}件の完了データ</small></span></button></div>
       </section>
 
       <section className="settings-card">
@@ -634,15 +712,16 @@ function ResourceRow({ name: initialName, color: initialColor, onSave, onDelete,
   return <div className="resource-row"><input type="color" value={color} onChange={(event) => setColor(event.target.value)} aria-label="色" /><input value={name} onChange={(event) => setName(event.target.value)} maxLength={60} /><div className="resource-row-actions"><button disabled={!changed || saving} onClick={save} title="保存"><Save size={15} /></button>{onArchive && <button onClick={onArchive} title="アーカイブ"><Archive size={15} /></button>}<button className="danger" onClick={onDelete} title="削除"><Trash2 size={15} /></button></div></div>;
 }
 
-function ItemRow({ item, onToggle, onRemove, onEdit }: { item: Item; onToggle: (item: Item) => void; onRemove: (item: Item) => void; onEdit: (item: Item) => void }) {
+function ItemRow({ item, onToggle, onToggleSubtask, onRemove, onEdit }: { item: Item; onToggle: (item: Item) => void; onToggleSubtask: (item: Item, subtaskId: number) => void; onRemove: (item: Item) => void; onEdit: (item: Item) => void }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [subtasksOpen, setSubtasksOpen] = useState(false);
   const dueLabel = item.dueDate ? new Intl.DateTimeFormat('ja-JP', { month: 'short', day: 'numeric' }).format(new Date(`${item.dueDate}T00:00:00`)) : null;
   const overdue = item.dueDate && item.dueDate < localDate() && item.status === 'open';
   const completedSubtasks = item.subtasks.filter((subtask) => subtask.completed).length;
   return (
     <article className={`item-row ${item.status === 'done' ? 'item-row--done' : ''}`}>
       <button className="check-button" onClick={() => onToggle(item)} aria-label={item.status === 'done' ? '未完了に戻す' : '完了にする'}>{item.status === 'done' && <Check size={15} />}</button>
-      <div className="item-body" onDoubleClick={() => onEdit(item)}><h3>{item.title}</h3>{item.note && <p>{item.note}</p>}{item.subtasks.length > 0 && <div className="subtask-progress"><ListChecks size={12} /><span>{completedSubtasks}/{item.subtasks.length}</span><i><b style={{ width: `${(completedSubtasks / item.subtasks.length) * 100}%` }} /></i></div>}<div className="item-meta">{item.projectName && <span className="project-chip"><Folder size={13} style={{ color: item.projectColor ?? '#657153' }} />{item.projectName}</span>}{item.categoryName && <span className="category-chip"><i style={{ background: item.categoryColor ?? '#657153' }} />{item.categoryName}</span>}{dueLabel && <span className={overdue ? 'overdue' : ''}><CalendarDays size={13} />{overdue ? '期限切れ · ' : ''}{dueLabel}</span>}{item.recurrence !== 'none' && <span><Repeat2 size={13} />{item.recurrence === 'daily' ? '毎日' : item.recurrence === 'weekly' ? '毎週' : '毎月'}</span>}{item.reminderAt && <span><Bell size={12} />通知</span>}{item.priority === 'high' && <span className="priority-high">優先</span>}</div></div>
+      <div className="item-body" onDoubleClick={() => onEdit(item)}><h3>{item.title}</h3>{item.note && <p>{item.note}</p>}{item.subtasks.length > 0 && <><button className="subtask-progress" onClick={(event) => { event.stopPropagation(); setSubtasksOpen((open) => !open); }}><ListChecks size={12} /><span>{completedSubtasks}/{item.subtasks.length}</span><i><b style={{ width: `${(completedSubtasks / item.subtasks.length) * 100}%` }} /></i><ChevronDown size={12} className={subtasksOpen ? 'open' : ''} /></button>{subtasksOpen && <div className="inline-subtasks" onDoubleClick={(event) => event.stopPropagation()}>{item.subtasks.map((subtask) => <button key={subtask.id} className={subtask.completed ? 'done' : ''} onClick={() => onToggleSubtask(item, subtask.id)}><i>{Boolean(subtask.completed) && <Check size={11} />}</i><span>{subtask.title}</span></button>)}</div>}</>}<div className="item-meta">{item.projectName && <span className="project-chip"><Folder size={13} style={{ color: item.projectColor ?? '#657153' }} />{item.projectName}</span>}{item.categoryName && <span className="category-chip"><i style={{ background: item.categoryColor ?? '#657153' }} />{item.categoryName}</span>}{dueLabel && <span className={overdue ? 'overdue' : ''}><CalendarDays size={13} />{overdue ? '期限切れ · ' : ''}{dueLabel}</span>}{item.recurrence !== 'none' && <span><Repeat2 size={13} />{item.recurrence === 'daily' ? '毎日' : item.recurrence === 'weekly' ? '毎週' : '毎月'}</span>}{item.reminderAt && <span><Bell size={12} />通知</span>}{item.priority === 'high' && <span className="priority-high">優先</span>}</div></div>
       <div className="item-menu-wrap"><button className="more-button" onClick={() => setMenuOpen((open) => !open)} aria-label="操作"><MoreHorizontal size={19} /></button>{menuOpen && <div className="item-menu"><button className="edit-action" onClick={() => { setMenuOpen(false); onEdit(item); }}><Edit3 size={15} />編集</button><button onClick={() => onRemove(item)}><Trash2 size={15} />削除</button></div>}</div>
     </article>
   );
