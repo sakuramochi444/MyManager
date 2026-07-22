@@ -3,6 +3,19 @@ export type ItemStatus = 'open' | 'done';
 export type Priority = 'low' | 'medium' | 'high';
 export type Recurrence = 'none' | 'daily' | 'weekly' | 'monthly';
 
+export interface Subtask {
+  id: number;
+  itemId: number;
+  title: string;
+  completed: number;
+  sortOrder: number;
+}
+
+export interface SubtaskInput {
+  title: string;
+  completed?: boolean;
+}
+
 export interface Item {
   id: number;
   title: string;
@@ -20,6 +33,7 @@ export interface Item {
   recurrence: Recurrence;
   reminderAt: string | null;
   sortOrder: number;
+  subtasks: Subtask[];
   createdAt: string;
   completedAt: string | null;
 }
@@ -48,6 +62,7 @@ export interface ItemInput {
   recurrence?: Recurrence;
   reminderAt?: string | null;
   sortOrder?: number;
+  subtasks?: SubtaskInput[];
 }
 
 export interface ItemUpdateResult {

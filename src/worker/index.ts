@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import type { ItemInput, ItemStatus, Recurrence } from '../shared/types';
+import type { ItemInput, ItemStatus, Recurrence, SubtaskInput } from '../shared/types';
 
 type Bindings = { mymanager_db: D1Database };
 type ItemRow = Record<string, unknown>;
@@ -26,14 +26,32 @@ function nextDate(value: unknown, recurrence: Recurrence) {
 }
 
 async function getItem(db: D1Database, id: number) {
-  return db.prepare(`${itemSelect} WHERE i.id = ?`).bind(id).first();
+  const item = await db.prepare(`${itemSelect} WHERE i.id = ?`).bind(id).first<Record<string, unknown>>();
+  if (!item) return null;
+  const subtasks = await db.prepare('SELECT id, item_id AS itemId, title, completed, sort_order AS sortOrder FROM subtasks WHERE item_id = ? ORDER BY sort_order, id').bind(id).all();
+  return { ...item, subtasks: subtasks.results };
+}
+
+async function replaceSubtasks(db: D1Database, itemId: number, subtasks: SubtaskInput[]) {
+  const statements = [db.prepare('DELETE FROM subtasks WHERE item_id = ?').bind(itemId)];
+  subtasks.filter((subtask) => subtask.title.trim()).forEach((subtask, index) => {
+    statements.push(db.prepare('INSERT INTO subtasks (item_id, title, completed, sort_order) VALUES (?, ?, ?, ?)').bind(itemId, subtask.title.trim(), subtask.completed ? 1 : 0, index));
+  });
+  await db.batch(statements);
 }
 
 api.get('/items', async (c) => {
+  const db = c.env.mymanager_db;
   const result = await c.env.mymanager_db.prepare(
     `${itemSelect} ORDER BY i.status ASC, i.sort_order ASC, i.due_date IS NULL, i.due_date ASC, i.created_at DESC`,
   ).all();
-  return c.json(result.results);
+  const subtaskResult = await db.prepare('SELECT id, item_id AS itemId, title, completed, sort_order AS sortOrder FROM subtasks ORDER BY sort_order, id').all();
+  const subtasksByItem = new Map<number, unknown[]>();
+  subtaskResult.results.forEach((subtask) => {
+    const itemId = Number((subtask as Record<string, unknown>).itemId);
+    subtasksByItem.set(itemId, [...(subtasksByItem.get(itemId) ?? []), subtask]);
+  });
+  return c.json(result.results.map((item) => ({ ...item, subtasks: subtasksByItem.get(Number((item as Record<string, unknown>).id)) ?? [] })));
 });
 
 api.post('/items', async (c) => {
@@ -50,6 +68,7 @@ api.post('/items', async (c) => {
     body.categoryId || null, body.projectId || null, body.recurrence ?? 'none', body.reminderAt || null,
     body.sortOrder ?? 0,
   ).first<{ id: number }>();
+  if (body.subtasks?.length) await replaceSubtasks(c.env.mymanager_db, result!.id, body.subtasks);
   return c.json(await getItem(c.env.mymanager_db, result!.id), 201);
 });
 
@@ -81,6 +100,7 @@ api.patch('/items/:id', async (c) => {
     body.sortOrder ?? current.sort_order,
     status, id,
   ).run();
+  if (body.subtasks !== undefined) await replaceSubtasks(db, id, body.subtasks);
 
   let nextItem = null;
   if (status === 'done' && current.status === 'open' && recurrence !== 'none') {
@@ -94,6 +114,8 @@ api.patch('/items/:id', async (c) => {
       body.projectId === undefined ? current.project_id : body.projectId || null,
       recurrence, body.sortOrder ?? current.sort_order,
     ).first<{ id: number }>();
+    const sourceSubtasks = body.subtasks ?? (await db.prepare('SELECT title, completed FROM subtasks WHERE item_id = ? ORDER BY sort_order, id').bind(id).all()).results.map((subtask) => ({ title: String((subtask as Record<string, unknown>).title), completed: false }));
+    if (sourceSubtasks.length) await replaceSubtasks(db, inserted!.id, sourceSubtasks.map((subtask) => ({ ...subtask, completed: false })));
     nextItem = await getItem(db, inserted!.id);
   }
   return c.json({ item: await getItem(db, id), nextItem });

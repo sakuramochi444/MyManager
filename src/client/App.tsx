@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   CalendarDays,
   Bell,
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Circle,
   Inbox,
   Download,
@@ -16,6 +18,7 @@ import {
   Clock3,
   Database,
   LayoutList,
+  ListChecks,
   Menu,
   MoreHorizontal,
   Plus,
@@ -30,11 +33,12 @@ import {
   Target,
   Palette,
   Trash2,
+  Undo2,
   X,
 } from 'lucide-react';
-import type { Category, Item, ItemInput, ItemKind, ItemUpdateResult, Priority, Project, Recurrence } from '../shared/types';
+import type { Category, Item, ItemInput, ItemKind, ItemUpdateResult, Priority, Project, Recurrence, SubtaskInput } from '../shared/types';
 
-type View = 'dashboard' | 'today' | 'upcoming' | 'overdue' | 'tasks' | 'wishes' | 'done' | 'settings';
+type View = 'dashboard' | 'calendar' | 'today' | 'upcoming' | 'overdue' | 'tasks' | 'wishes' | 'done' | 'settings';
 type Sort = 'smart' | 'due' | 'priority' | 'created';
 type Accent = 'sage' | 'blue' | 'terracotta';
 type Density = 'comfortable' | 'compact';
@@ -54,6 +58,7 @@ function loadPreferences(): Preferences {
 
 const views: { id: View; label: string; icon: typeof Circle }[] = [
   { id: 'dashboard', label: 'ダッシュボード', icon: BarChart3 },
+  { id: 'calendar', label: 'カレンダー', icon: CalendarDays },
   { id: 'today', label: '今日', icon: CalendarDays },
   { id: 'upcoming', label: '今後の予定', icon: CalendarDays },
   { id: 'overdue', label: '期限切れ', icon: Bell },
@@ -65,6 +70,7 @@ const views: { id: View; label: string; icon: typeof Circle }[] = [
 
 const viewCopy: Record<View, { title: string; subtitle: string }> = {
   dashboard: { title: 'ダッシュボード', subtitle: '今の状況と、次に取り組むことを見渡せます。' },
+  calendar: { title: 'カレンダー', subtitle: '期限のあるタスクを、月ごとに見渡せます。' },
   today: { title: '今日', subtitle: '今日やることに、静かに集中しましょう。' },
   upcoming: { title: '今後の予定', subtitle: 'これから一週間の予定を見渡せます。' },
   overdue: { title: '期限切れ', subtitle: '残っていることを整理して、すっきりさせましょう。' },
@@ -106,6 +112,7 @@ export function App() {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [composerOpen, setComposerOpen] = useState(false);
+  const [composerDate, setComposerDate] = useState<string | null>(null);
   const [editingItem, setEditingItem] = useState<Item | null>(null);
   const [quickTitle, setQuickTitle] = useState('');
   const [sort, setSort] = useState<Sort>('smart');
@@ -113,6 +120,9 @@ export function App() {
   const [projectFilter, setProjectFilter] = useState<number | 'all'>('all');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [undoNotice, setUndoNotice] = useState<{ message: string; action: () => void } | null>(null);
+  const undoHideTimer = useRef<number | null>(null);
+  const pendingDelete = useRef<{ item: Item; timer: number } | null>(null);
 
   useEffect(() => {
     Promise.all([request<Item[]>('/api/items'), request<Category[]>('/api/categories'), request<Project[]>('/api/projects')])
@@ -136,6 +146,25 @@ export function App() {
     document.documentElement.style.setProperty('--green', colors.base);
     document.documentElement.style.setProperty('--green-dark', colors.dark);
   }, [preferences]);
+
+  useEffect(() => () => {
+    if (undoHideTimer.current) window.clearTimeout(undoHideTimer.current);
+    if (pendingDelete.current) window.clearTimeout(pendingDelete.current.timer);
+  }, []);
+
+  function showUndo(message: string, action: () => void) {
+    if (undoHideTimer.current) window.clearTimeout(undoHideTimer.current);
+    setUndoNotice({ message, action });
+    undoHideTimer.current = window.setTimeout(() => setUndoNotice(null), 6_000);
+  }
+
+  function performUndo() {
+    const notice = undoNotice;
+    if (!notice) return;
+    if (undoHideTimer.current) window.clearTimeout(undoHideTimer.current);
+    setUndoNotice(null);
+    notice.action();
+  }
 
   const visibleItems = useMemo(() => {
     const today = localDate();
@@ -163,6 +192,7 @@ export function App() {
 
   const counts = useMemo(() => ({
     dashboard: 0,
+    calendar: 0,
     today: items.filter((item) => item.status === 'open' && item.kind === 'task' && item.dueDate === localDate()).length,
     upcoming: items.filter((item) => item.status === 'open' && item.kind === 'task' && Boolean(item.dueDate && item.dueDate > localDate() && item.dueDate <= dateAfter(7))).length,
     overdue: items.filter((item) => item.status === 'open' && item.kind === 'task' && Boolean(item.dueDate && item.dueDate < localDate())).length,
@@ -262,13 +292,15 @@ export function App() {
     } catch (reason) { setError((reason as Error).message); }
   }
 
-  function openNew() {
+  function openNew(date?: string) {
     setEditingItem(null);
+    setComposerDate(date ?? null);
     setComposerOpen(true);
   }
 
   function openEdit(item: Item) {
     setEditingItem(item);
+    setComposerDate(null);
     setComposerOpen(true);
   }
 
@@ -281,21 +313,43 @@ export function App() {
         const updated = current.map((candidate) => candidate.id === item.id ? result.item : candidate);
         return result.nextItem ? [result.nextItem, ...updated] : updated;
       });
+      if (status === 'done') showUndo('タスクを完了しました', () => {
+        void (async () => {
+          try {
+            const reopened = await request<ItemUpdateResult>(`/api/items/${item.id}`, { method: 'PATCH', body: JSON.stringify({ status: 'open' }) });
+            if (result.nextItem) await request<void>(`/api/items/${result.nextItem.id}`, { method: 'DELETE' });
+            setItems((current) => current.filter((candidate) => candidate.id !== result.nextItem?.id).map((candidate) => candidate.id === item.id ? reopened.item : candidate));
+          } catch (reason) { setError((reason as Error).message); }
+        })();
+      });
     } catch (reason) {
       setItems((current) => current.map((candidate) => candidate.id === item.id ? item : candidate));
       setError((reason as Error).message);
     }
   }
 
-  async function removeItem(item: Item) {
-    const previous = items;
-    setItems((current) => current.filter((candidate) => candidate.id !== item.id));
-    try {
-      await request<void>(`/api/items/${item.id}`, { method: 'DELETE' });
-    } catch (reason) {
-      setItems(previous);
-      setError((reason as Error).message);
+  function removeItem(item: Item) {
+    if (pendingDelete.current) {
+      window.clearTimeout(pendingDelete.current.timer);
+      void request<void>(`/api/items/${pendingDelete.current.item.id}`, { method: 'DELETE' }).catch((reason: Error) => setError(reason.message));
+      pendingDelete.current = null;
     }
+    setItems((current) => current.filter((candidate) => candidate.id !== item.id));
+    const timer = window.setTimeout(() => {
+      void request<void>(`/api/items/${item.id}`, { method: 'DELETE' }).catch((reason: Error) => {
+        setItems((current) => [item, ...current]);
+        setError(reason.message);
+      });
+      pendingDelete.current = null;
+    }, 6_000);
+    pendingDelete.current = { item, timer };
+    showUndo('タスクを削除しました', () => {
+      if (pendingDelete.current?.item.id === item.id) {
+        window.clearTimeout(pendingDelete.current.timer);
+        pendingDelete.current = null;
+        setItems((current) => [item, ...current]);
+      }
+    });
   }
 
   function navigate(next: View) {
@@ -327,7 +381,7 @@ export function App() {
           <p className="nav-label">管理</p>
           {views.map(({ id, label, icon: Icon }) => (
             <button key={id} className={`nav-item ${view === id ? 'nav-item--active' : ''}`} onClick={() => navigate(id)}>
-              <Icon size={18} strokeWidth={1.8} /><span>{label}</span><span className="nav-count">{id === 'settings' || id === 'dashboard' ? '' : counts[id]}</span>
+              <Icon size={18} strokeWidth={1.8} /><span>{label}</span><span className="nav-count">{id === 'settings' || id === 'dashboard' || id === 'calendar' ? '' : counts[id]}</span>
             </button>
           ))}
         </nav>
@@ -342,8 +396,8 @@ export function App() {
       <main className="main">
         <header className="topbar">
           <button className="icon-button menu-button" onClick={() => setSidebarOpen(true)} aria-label="メニュー"><Menu size={21} /></button>
-          {view !== 'settings' && view !== 'dashboard' ? <div className="search-wrap"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="タスクを検索..." aria-label="検索" />{query && <button onClick={() => setQuery('')} aria-label="検索をクリア"><X size={15} /></button>}</div> : <div className="topbar-context">{view === 'settings' ? <SettingsIcon size={17} /> : <BarChart3 size={17} />}{view === 'settings' ? '環境設定' : '全体サマリー'}</div>}
-          {view !== 'settings' && <div className="top-actions"><a className="export-button" href="/api/export" download title="データを書き出す"><Download size={17} /></a><button className="add-button" onClick={openNew}><Plus size={18} /><span>新しく追加</span></button></div>}
+          {!['settings', 'dashboard', 'calendar'].includes(view) ? <div className="search-wrap"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="タスクを検索..." aria-label="検索" />{query && <button onClick={() => setQuery('')} aria-label="検索をクリア"><X size={15} /></button>}</div> : <div className="topbar-context">{view === 'settings' ? <SettingsIcon size={17} /> : view === 'calendar' ? <CalendarDays size={17} /> : <BarChart3 size={17} />}{view === 'settings' ? '環境設定' : view === 'calendar' ? '月間予定' : '全体サマリー'}</div>}
+          {view !== 'settings' && <div className="top-actions"><a className="export-button" href="/api/export" download title="データを書き出す"><Download size={17} /></a><button className="add-button" onClick={() => openNew()}><Plus size={18} /><span>新しく追加</span></button></div>}
         </header>
 
         <section className="content">
@@ -352,7 +406,7 @@ export function App() {
             <div className="date-card"><CalendarDays size={18} /><span>{new Intl.DateTimeFormat('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }).format(new Date())}</span></div>
           </div>
 
-          {view === 'dashboard' ? <DashboardPanel items={items} projects={projects} onNavigate={navigate} onEdit={openEdit} /> : view === 'settings' ? <SettingsPanel categories={categories} projects={projects} preferences={preferences} completedCount={counts.done} onPreferencesChange={setPreferences} onCreateCategory={createCategory} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onCreateProject={async (name, color) => { await createProject(name, color); }} onUpdateProject={updateProject} onDeleteProject={deleteProject} onClearCompleted={clearCompleted} /> : <>
+          {view === 'dashboard' ? <DashboardPanel items={items} projects={projects} onNavigate={navigate} onEdit={openEdit} /> : view === 'calendar' ? <CalendarPanel items={items} onAddDate={openNew} onEdit={openEdit} /> : view === 'settings' ? <SettingsPanel categories={categories} projects={projects} preferences={preferences} completedCount={counts.done} onPreferencesChange={setPreferences} onCreateCategory={createCategory} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onCreateProject={async (name, color) => { await createProject(name, color); }} onUpdateProject={updateProject} onDeleteProject={deleteProject} onClearCompleted={clearCompleted} /> : <>
           <div className="summary-strip" aria-label="進捗サマリー">
             <button onClick={() => navigate('today')}><span>今日</span><strong>{counts.today}</strong></button>
             <button onClick={() => navigate('upcoming')}><span>今後7日</span><strong>{counts.upcoming}</strong></button>
@@ -375,7 +429,7 @@ export function App() {
       </main>
 
       <nav className="bottom-nav" aria-label="スマートフォン用メニュー">
-        {views.filter(({ id }) => ['dashboard', 'today', 'tasks', 'wishes', 'settings'].includes(id)).map(({ id, label, icon: Icon }) => (
+        {views.filter(({ id }) => ['dashboard', 'today', 'calendar', 'tasks', 'wishes', 'settings'].includes(id)).map(({ id, label, icon: Icon }) => (
           <button key={id} className={view === id ? 'active' : ''} onClick={() => navigate(id)} aria-current={view === id ? 'page' : undefined}>
             <span className="bottom-nav-icon"><Icon size={20} strokeWidth={1.8} />{counts[id] > 0 && <i>{counts[id] > 99 ? '99+' : counts[id]}</i>}</span>
             <span>{id === 'tasks' ? 'タスク' : id === 'wishes' ? 'やりたい' : id === 'upcoming' ? '予定' : label}</span>
@@ -383,11 +437,45 @@ export function App() {
         ))}
       </nav>
 
-      {view !== 'settings' && <button className="mobile-fab" onClick={openNew} aria-label="新しい項目を追加"><Plus size={24} /></button>}
-      {composerOpen && <Composer categories={categories} projects={projects} initialItem={editingItem} defaultKind={view === 'wishes' ? 'wish' : 'task'} defaultToday={view === 'today'} onClose={() => { setComposerOpen(false); setEditingItem(null); }} onSubmit={editingItem ? updateItem : createItem} onCreateProject={createProject} />}
+      {view !== 'settings' && <button className="mobile-fab" onClick={() => openNew()} aria-label="新しい項目を追加"><Plus size={24} /></button>}
+      {composerOpen && <Composer categories={categories} projects={projects} initialItem={editingItem} defaultKind={view === 'wishes' ? 'wish' : 'task'} defaultDate={composerDate ?? (view === 'today' ? localDate() : null)} onClose={() => { setComposerOpen(false); setEditingItem(null); setComposerDate(null); }} onSubmit={editingItem ? updateItem : createItem} onCreateProject={createProject} />}
+      {undoNotice && <div className="undo-toast" role="status"><span>{undoNotice.message}</span><button onClick={performUndo}><Undo2 size={15} />元に戻す</button></div>}
       {error && <div className="toast" role="alert"><span>{error}</span><button onClick={() => setError(null)}><X size={16} /></button></div>}
     </div>
   );
+}
+
+function CalendarPanel({ items, onAddDate, onEdit }: { items: Item[]; onAddDate: (date: string) => void; onEdit: (item: Item) => void }) {
+  const [month, setMonth] = useState(() => { const date = new Date(); date.setDate(1); return date; });
+  const [selectedDate, setSelectedDate] = useState(localDate());
+  const year = month.getFullYear();
+  const monthIndex = month.getMonth();
+  const firstDay = new Date(year, monthIndex, 1);
+  const gridStart = new Date(firstDay);
+  gridStart.setDate(gridStart.getDate() - ((firstDay.getDay() + 6) % 7));
+  const days = Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(gridStart);
+    date.setDate(gridStart.getDate() + index);
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    return { date, key, items: items.filter((item) => item.dueDate === key && item.kind === 'task') };
+  });
+  const selectedItems = items.filter((item) => item.dueDate === selectedDate && item.kind === 'task').sort((a, b) => Number(a.status === 'done') - Number(b.status === 'done'));
+
+  function changeMonth(offset: number) {
+    setMonth((current) => new Date(current.getFullYear(), current.getMonth() + offset, 1));
+  }
+
+  return <div className="calendar-layout">
+    <section className="calendar-card">
+      <div className="calendar-toolbar"><button onClick={() => changeMonth(-1)} aria-label="前の月"><ChevronLeft size={18} /></button><div><strong>{year}年 {monthIndex + 1}月</strong><button onClick={() => { const now = new Date(); now.setDate(1); setMonth(now); setSelectedDate(localDate()); }}>今日へ戻る</button></div><button onClick={() => changeMonth(1)} aria-label="次の月"><ChevronRight size={18} /></button></div>
+      <div className="calendar-weekdays">{['月', '火', '水', '木', '金', '土', '日'].map((day) => <span key={day}>{day}</span>)}</div>
+      <div className="calendar-grid">{days.map((day) => <div key={day.key} className={`calendar-day ${day.date.getMonth() !== monthIndex ? 'outside' : ''} ${day.key === selectedDate ? 'selected' : ''} ${day.key === localDate() ? 'today' : ''}`}><button className="calendar-day-number" onClick={() => setSelectedDate(day.key)}>{day.date.getDate()}</button><div className="calendar-day-items">{day.items.slice(0, 3).map((item) => <button key={item.id} className={item.status === 'done' ? 'done' : ''} onClick={() => onEdit(item)}><i style={{ background: item.projectColor ?? item.categoryColor ?? '#657153' }} /><span>{item.title}</span></button>)}{day.items.length > 3 && <small>ほか{day.items.length - 3}件</small>}</div><span className="calendar-mobile-count">{day.items.length > 0 && day.items.length}</span></div>)}</div>
+    </section>
+    <aside className="calendar-agenda">
+      <div className="calendar-agenda-header"><div><p className="eyebrow">SELECTED DAY</p><h2>{new Intl.DateTimeFormat('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }).format(new Date(`${selectedDate}T00:00:00`))}</h2></div><button onClick={() => onAddDate(selectedDate)}><Plus size={16} />追加</button></div>
+      <div className="calendar-agenda-list">{selectedItems.length ? selectedItems.map((item) => <button key={item.id} onClick={() => onEdit(item)}><i className={item.status === 'done' ? 'done' : ''}>{item.status === 'done' && <Check size={11} />}</i><span><strong>{item.title}</strong><small>{item.projectName ?? item.categoryName ?? (item.priority === 'high' ? '優先度：高' : 'タスク')}</small></span><ChevronRight size={14} /></button>) : <DashboardEmpty icon={<CalendarDays size={19} />} text="この日のタスクはありません" />}</div>
+    </aside>
+  </div>;
 }
 
 function DashboardPanel({ items, projects, onNavigate, onEdit }: { items: Item[]; projects: Project[]; onNavigate: (view: View) => void; onEdit: (item: Item) => void }) {
@@ -550,25 +638,27 @@ function ItemRow({ item, onToggle, onRemove, onEdit }: { item: Item; onToggle: (
   const [menuOpen, setMenuOpen] = useState(false);
   const dueLabel = item.dueDate ? new Intl.DateTimeFormat('ja-JP', { month: 'short', day: 'numeric' }).format(new Date(`${item.dueDate}T00:00:00`)) : null;
   const overdue = item.dueDate && item.dueDate < localDate() && item.status === 'open';
+  const completedSubtasks = item.subtasks.filter((subtask) => subtask.completed).length;
   return (
     <article className={`item-row ${item.status === 'done' ? 'item-row--done' : ''}`}>
       <button className="check-button" onClick={() => onToggle(item)} aria-label={item.status === 'done' ? '未完了に戻す' : '完了にする'}>{item.status === 'done' && <Check size={15} />}</button>
-      <div className="item-body" onDoubleClick={() => onEdit(item)}><h3>{item.title}</h3>{item.note && <p>{item.note}</p>}<div className="item-meta">{item.projectName && <span className="project-chip"><Folder size={13} style={{ color: item.projectColor ?? '#657153' }} />{item.projectName}</span>}{item.categoryName && <span className="category-chip"><i style={{ background: item.categoryColor ?? '#657153' }} />{item.categoryName}</span>}{dueLabel && <span className={overdue ? 'overdue' : ''}><CalendarDays size={13} />{overdue ? '期限切れ · ' : ''}{dueLabel}</span>}{item.recurrence !== 'none' && <span><Repeat2 size={13} />{item.recurrence === 'daily' ? '毎日' : item.recurrence === 'weekly' ? '毎週' : '毎月'}</span>}{item.reminderAt && <span><Bell size={12} />通知</span>}{item.priority === 'high' && <span className="priority-high">優先</span>}</div></div>
+      <div className="item-body" onDoubleClick={() => onEdit(item)}><h3>{item.title}</h3>{item.note && <p>{item.note}</p>}{item.subtasks.length > 0 && <div className="subtask-progress"><ListChecks size={12} /><span>{completedSubtasks}/{item.subtasks.length}</span><i><b style={{ width: `${(completedSubtasks / item.subtasks.length) * 100}%` }} /></i></div>}<div className="item-meta">{item.projectName && <span className="project-chip"><Folder size={13} style={{ color: item.projectColor ?? '#657153' }} />{item.projectName}</span>}{item.categoryName && <span className="category-chip"><i style={{ background: item.categoryColor ?? '#657153' }} />{item.categoryName}</span>}{dueLabel && <span className={overdue ? 'overdue' : ''}><CalendarDays size={13} />{overdue ? '期限切れ · ' : ''}{dueLabel}</span>}{item.recurrence !== 'none' && <span><Repeat2 size={13} />{item.recurrence === 'daily' ? '毎日' : item.recurrence === 'weekly' ? '毎週' : '毎月'}</span>}{item.reminderAt && <span><Bell size={12} />通知</span>}{item.priority === 'high' && <span className="priority-high">優先</span>}</div></div>
       <div className="item-menu-wrap"><button className="more-button" onClick={() => setMenuOpen((open) => !open)} aria-label="操作"><MoreHorizontal size={19} /></button>{menuOpen && <div className="item-menu"><button className="edit-action" onClick={() => { setMenuOpen(false); onEdit(item); }}><Edit3 size={15} />編集</button><button onClick={() => onRemove(item)}><Trash2 size={15} />削除</button></div>}</div>
     </article>
   );
 }
 
-function Composer({ categories, projects, initialItem, defaultKind, defaultToday, onClose, onSubmit, onCreateProject }: { categories: Category[]; projects: Project[]; initialItem: Item | null; defaultKind: ItemKind; defaultToday: boolean; onClose: () => void; onSubmit: (input: ItemInput) => Promise<void>; onCreateProject: (name: string) => Promise<Project> }) {
+function Composer({ categories, projects, initialItem, defaultKind, defaultDate, onClose, onSubmit, onCreateProject }: { categories: Category[]; projects: Project[]; initialItem: Item | null; defaultKind: ItemKind; defaultDate: string | null; onClose: () => void; onSubmit: (input: ItemInput) => Promise<void>; onCreateProject: (name: string) => Promise<Project> }) {
   const [title, setTitle] = useState(initialItem?.title ?? '');
   const [note, setNote] = useState(initialItem?.note ?? '');
   const [kind, setKind] = useState<ItemKind>(initialItem?.kind ?? defaultKind);
-  const [dueDate, setDueDate] = useState(initialItem?.dueDate ?? (defaultToday ? localDate() : ''));
+  const [dueDate, setDueDate] = useState(initialItem?.dueDate ?? defaultDate ?? '');
   const [priority, setPriority] = useState<Priority>(initialItem?.priority ?? 'medium');
   const [categoryId, setCategoryId] = useState(initialItem?.categoryId ? String(initialItem.categoryId) : '');
   const [projectId, setProjectId] = useState(initialItem?.projectId ? String(initialItem.projectId) : '');
   const [recurrence, setRecurrence] = useState<Recurrence>(initialItem?.recurrence ?? 'none');
   const [reminderAt, setReminderAt] = useState(initialItem?.reminderAt ?? '');
+  const [subtasks, setSubtasks] = useState<SubtaskInput[]>(initialItem?.subtasks.map((subtask) => ({ title: subtask.title, completed: Boolean(subtask.completed) })) ?? []);
   const [addingProject, setAddingProject] = useState(false);
   const [projectName, setProjectName] = useState('');
   const [saving, setSaving] = useState(false);
@@ -583,7 +673,7 @@ function Composer({ categories, projects, initialItem, defaultKind, defaultToday
     event.preventDefault();
     if (!title.trim()) return;
     setSaving(true);
-    await onSubmit({ title, note, kind, dueDate: kind === 'task' ? dueDate || null : null, priority, categoryId: categoryId ? Number(categoryId) : null, projectId: projectId ? Number(projectId) : null, recurrence: kind === 'task' ? recurrence : 'none', reminderAt: kind === 'task' ? reminderAt || null : null });
+    await onSubmit({ title, note, kind, dueDate: kind === 'task' ? dueDate || null : null, priority, categoryId: categoryId ? Number(categoryId) : null, projectId: projectId ? Number(projectId) : null, recurrence: kind === 'task' ? recurrence : 'none', reminderAt: kind === 'task' ? reminderAt || null : null, subtasks: kind === 'task' ? subtasks.filter((subtask) => subtask.title.trim()) : [] });
     setSaving(false);
   }
 
@@ -604,6 +694,7 @@ function Composer({ categories, projects, initialItem, defaultKind, defaultToday
         <div className="kind-switch"><button type="button" className={kind === 'task' ? 'active' : ''} onClick={() => setKind('task')}><CheckCircle2 size={17} />タスク</button><button type="button" className={kind === 'wish' ? 'active' : ''} onClick={() => setKind('wish')}><Sparkles size={17} />やりたいこと</button></div>
         <label className="field"><span>タイトル</span><input autoFocus={!window.matchMedia('(pointer: coarse)').matches} maxLength={200} value={title} onChange={(event) => setTitle(event.target.value)} placeholder={kind === 'task' ? '何をしますか？' : 'いつか叶えたいことは？'} /></label>
         <label className="field"><span>メモ <small>任意</small></span><textarea rows={3} value={note} onChange={(event) => setNote(event.target.value)} placeholder="詳細やアイデアを書き留める" /></label>
+        {kind === 'task' && <div className="subtask-editor"><div className="subtask-editor-heading"><span><ListChecks size={15} />サブタスク</span><small>{subtasks.filter((subtask) => subtask.completed).length}/{subtasks.length}</small></div><div className="subtask-editor-list">{subtasks.map((subtask, index) => <div key={index}><button type="button" className={subtask.completed ? 'checked' : ''} onClick={() => setSubtasks((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, completed: !item.completed } : item))}>{subtask.completed && <Check size={13} />}</button><input value={subtask.title} onChange={(event) => setSubtasks((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, title: event.target.value } : item))} placeholder="小さな作業を入力" /><button type="button" className="remove-subtask" onClick={() => setSubtasks((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button></div>)}</div><button type="button" className="add-subtask" onClick={() => setSubtasks((current) => [...current, { title: '', completed: false }])}><Plus size={14} />サブタスクを追加</button></div>}
         <div className="field-grid composer-options">
           {kind === 'task' && <div className="field date-field"><label htmlFor="due-date">期限</label><input id="due-date" type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} /><span className="date-shortcuts"><button type="button" className={dueDate === localDate() ? 'active' : ''} onClick={() => setDueDate(localDate())}>今日</button><button type="button" className={dueDate === dateAfter(1) ? 'active' : ''} onClick={() => setDueDate(dateAfter(1))}>明日</button><button type="button" className={!dueDate ? 'active' : ''} onClick={() => setDueDate('')}>期限なし</button></span></div>}
           <label className="field"><span>カテゴリ</span><select value={categoryId} onChange={(event) => setCategoryId(event.target.value)}><option value="">なし</option>{categories.map((category) => <option value={category.id} key={category.id}>{category.name}</option>)}</select></label>
