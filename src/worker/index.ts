@@ -130,6 +130,28 @@ api.post('/categories', async (c) => {
   }
 });
 
+api.patch('/categories/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  const body = await c.req.json<{ name?: string; color?: string }>();
+  const name = body.name?.trim();
+  const color = /^#[0-9a-f]{6}$/i.test(body.color ?? '') ? body.color! : null;
+  if (!Number.isInteger(id) || !name || !color || name.length > 40) return c.json({ error: 'カテゴリの入力内容を確認してください。' }, 400);
+  try {
+    const result = await c.env.mymanager_db.prepare('UPDATE categories SET name = ?, color = ? WHERE id = ? RETURNING id, name, color').bind(name, color, id).first();
+    if (!result) return c.json({ error: 'カテゴリが見つかりません。' }, 404);
+    return c.json(result);
+  } catch {
+    return c.json({ error: '同じ名前のカテゴリがあります。' }, 409);
+  }
+});
+
+api.delete('/categories/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id)) return c.json({ error: '不正なIDです。' }, 400);
+  await c.env.mymanager_db.prepare('DELETE FROM categories WHERE id = ?').bind(id).run();
+  return c.body(null, 204);
+});
+
 api.get('/projects', async (c) => {
   const result = await c.env.mymanager_db.prepare('SELECT id, name, color, archived FROM projects WHERE archived = 0 ORDER BY name').all();
   return c.json(result.results);
@@ -146,6 +168,28 @@ api.post('/projects', async (c) => {
   } catch {
     return c.json({ error: '同じ名前のプロジェクトがあります。' }, 409);
   }
+});
+
+api.patch('/projects/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  const body = await c.req.json<{ name?: string; color?: string; archived?: boolean }>();
+  const current = await c.env.mymanager_db.prepare('SELECT * FROM projects WHERE id = ?').bind(id).first<Record<string, unknown>>();
+  if (!Number.isInteger(id) || !current) return c.json({ error: 'プロジェクトが見つかりません。' }, 404);
+  const name = body.name?.trim() || String(current.name);
+  const color = /^#[0-9a-f]{6}$/i.test(body.color ?? '') ? body.color! : String(current.color);
+  try {
+    const result = await c.env.mymanager_db.prepare('UPDATE projects SET name = ?, color = ?, archived = ? WHERE id = ? RETURNING id, name, color, archived').bind(name, color, body.archived === undefined ? current.archived : body.archived ? 1 : 0, id).first();
+    return c.json(result);
+  } catch {
+    return c.json({ error: '同じ名前のプロジェクトがあります。' }, 409);
+  }
+});
+
+api.delete('/projects/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id)) return c.json({ error: '不正なIDです。' }, 400);
+  await c.env.mymanager_db.prepare('DELETE FROM projects WHERE id = ?').bind(id).run();
+  return c.body(null, 204);
 });
 
 api.get('/export', async (c) => {

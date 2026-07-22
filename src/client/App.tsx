@@ -10,21 +10,43 @@ import {
   Download,
   Edit3,
   Folder,
+  Archive,
+  Database,
   LayoutList,
   Menu,
   MoreHorizontal,
   Plus,
   Search,
   Repeat2,
+  Save,
+  Settings as SettingsIcon,
+  ShieldCheck,
   SlidersHorizontal,
   Sparkles,
+  Tags,
+  Palette,
   Trash2,
   X,
 } from 'lucide-react';
 import type { Category, Item, ItemInput, ItemKind, ItemUpdateResult, Priority, Project, Recurrence } from '../shared/types';
 
-type View = 'today' | 'upcoming' | 'overdue' | 'tasks' | 'wishes' | 'done';
+type View = 'today' | 'upcoming' | 'overdue' | 'tasks' | 'wishes' | 'done' | 'settings';
 type Sort = 'smart' | 'due' | 'priority' | 'created';
+type Accent = 'sage' | 'blue' | 'terracotta';
+type Density = 'comfortable' | 'compact';
+interface Preferences { defaultView: Exclude<View, 'settings'>; accent: Accent; density: Density }
+
+const defaultPreferences: Preferences = { defaultView: 'today', accent: 'sage', density: 'comfortable' };
+const accentColors: Record<Accent, { base: string; dark: string }> = {
+  sage: { base: '#58634a', dark: '#414b36' },
+  blue: { base: '#49677e', dark: '#354f64' },
+  terracotta: { base: '#a75f50', dark: '#85483d' },
+};
+
+function loadPreferences(): Preferences {
+  try { return { ...defaultPreferences, ...JSON.parse(localStorage.getItem('mymanager-preferences') ?? '{}') as Partial<Preferences> }; }
+  catch { return defaultPreferences; }
+}
 
 const views: { id: View; label: string; icon: typeof Circle }[] = [
   { id: 'today', label: '今日', icon: CalendarDays },
@@ -33,6 +55,7 @@ const views: { id: View; label: string; icon: typeof Circle }[] = [
   { id: 'tasks', label: 'すべてのタスク', icon: LayoutList },
   { id: 'wishes', label: 'やりたいこと', icon: Sparkles },
   { id: 'done', label: '完了済み', icon: CheckCircle2 },
+  { id: 'settings', label: '設定', icon: SettingsIcon },
 ];
 
 const viewCopy: Record<View, { title: string; subtitle: string }> = {
@@ -42,6 +65,7 @@ const viewCopy: Record<View, { title: string; subtitle: string }> = {
   tasks: { title: 'すべてのタスク', subtitle: '予定していることをまとめて確認できます。' },
   wishes: { title: 'やりたいこと', subtitle: 'いつか叶えたいことを、忘れない場所へ。' },
   done: { title: '完了済み', subtitle: '積み重ねてきた成果です。' },
+  settings: { title: '設定', subtitle: '自分の使い方に合わせて、MyManagerを整えます。' },
 };
 
 function localDate() {
@@ -68,10 +92,11 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export function App() {
+  const [preferences, setPreferences] = useState<Preferences>(loadPreferences);
   const [items, setItems] = useState<Item[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [view, setView] = useState<View>('today');
+  const [view, setView] = useState<View>(() => loadPreferences().defaultView);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [composerOpen, setComposerOpen] = useState(false);
@@ -98,6 +123,13 @@ export function App() {
     document.body.style.overflow = composerOpen || sidebarOpen ? 'hidden' : '';
     return () => { document.body.style.overflow = ''; };
   }, [composerOpen, sidebarOpen]);
+
+  useEffect(() => {
+    localStorage.setItem('mymanager-preferences', JSON.stringify(preferences));
+    const colors = accentColors[preferences.accent];
+    document.documentElement.style.setProperty('--green', colors.base);
+    document.documentElement.style.setProperty('--green-dark', colors.dark);
+  }, [preferences]);
 
   const visibleItems = useMemo(() => {
     const today = localDate();
@@ -130,6 +162,7 @@ export function App() {
     tasks: items.filter((item) => item.status === 'open' && item.kind === 'task').length,
     wishes: items.filter((item) => item.status === 'open' && item.kind === 'wish').length,
     done: items.filter((item) => item.status === 'done').length,
+    settings: 0,
   }), [items]);
 
   async function createItem(input: ItemInput) {
@@ -157,10 +190,53 @@ export function App() {
     }
   }
 
-  async function createProject(name: string) {
-    const project = await request<Project>('/api/projects', { method: 'POST', body: JSON.stringify({ name }) });
-    setProjects((current) => [...current, project].sort((a, b) => a.name.localeCompare(b.name, 'ja')));
-    return project;
+  async function createProject(name: string, color = '#6f7c64') {
+    try {
+      const project = await request<Project>('/api/projects', { method: 'POST', body: JSON.stringify({ name, color }) });
+      setProjects((current) => [...current, project].sort((a, b) => a.name.localeCompare(b.name, 'ja')));
+      return project;
+    } catch (reason) { setError((reason as Error).message); throw reason; }
+  }
+
+  async function createCategory(name: string, color: string) {
+    try {
+      const category = await request<Category>('/api/categories', { method: 'POST', body: JSON.stringify({ name, color }) });
+      setCategories((current) => [...current, category].sort((a, b) => a.name.localeCompare(b.name, 'ja')));
+    } catch (reason) { setError((reason as Error).message); throw reason; }
+  }
+
+  async function updateCategory(category: Category) {
+    try {
+      const updated = await request<Category>(`/api/categories/${category.id}`, { method: 'PATCH', body: JSON.stringify(category) });
+      setCategories((current) => current.map((item) => item.id === updated.id ? updated : item).sort((a, b) => a.name.localeCompare(b.name, 'ja')));
+      setItems((current) => current.map((item) => item.categoryId === updated.id ? { ...item, categoryName: updated.name, categoryColor: updated.color } : item));
+    } catch (reason) { setError((reason as Error).message); throw reason; }
+  }
+
+  async function deleteCategory(category: Category) {
+    if (!window.confirm(`カテゴリ「${category.name}」を削除しますか？\nタスク自体は削除されません。`)) return;
+    try {
+      await request<void>(`/api/categories/${category.id}`, { method: 'DELETE' });
+      setCategories((current) => current.filter((item) => item.id !== category.id));
+      setItems((current) => current.map((item) => item.categoryId === category.id ? { ...item, categoryId: null, categoryName: null, categoryColor: null } : item));
+    } catch (reason) { setError((reason as Error).message); }
+  }
+
+  async function updateProject(project: Project) {
+    try {
+      const updated = await request<Project>(`/api/projects/${project.id}`, { method: 'PATCH', body: JSON.stringify(project) });
+      setProjects((current) => updated.archived ? current.filter((item) => item.id !== updated.id) : current.map((item) => item.id === updated.id ? updated : item).sort((a, b) => a.name.localeCompare(b.name, 'ja')));
+      setItems((current) => current.map((item) => item.projectId === updated.id ? { ...item, projectName: updated.name, projectColor: updated.color } : item));
+    } catch (reason) { setError((reason as Error).message); throw reason; }
+  }
+
+  async function deleteProject(project: Project) {
+    if (!window.confirm(`プロジェクト「${project.name}」を削除しますか？\nタスク自体は削除されません。`)) return;
+    try {
+      await request<void>(`/api/projects/${project.id}`, { method: 'DELETE' });
+      setProjects((current) => current.filter((item) => item.id !== project.id));
+      setItems((current) => current.map((item) => item.projectId === project.id ? { ...item, projectId: null, projectName: null, projectColor: null } : item));
+    } catch (reason) { setError((reason as Error).message); }
   }
 
   async function quickAdd(event: React.FormEvent) {
@@ -237,14 +313,14 @@ export function App() {
   }, [items]);
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell density-${preferences.density}`}>
       <aside className={`sidebar ${sidebarOpen ? 'sidebar--open' : ''}`}>
         <div className="brand"><span className="brand-mark"><Check size={18} /></span><span>MyManager</span></div>
         <nav className="nav-list" aria-label="メインメニュー">
           <p className="nav-label">管理</p>
           {views.map(({ id, label, icon: Icon }) => (
             <button key={id} className={`nav-item ${view === id ? 'nav-item--active' : ''}`} onClick={() => navigate(id)}>
-              <Icon size={18} strokeWidth={1.8} /><span>{label}</span><span className="nav-count">{counts[id]}</span>
+              <Icon size={18} strokeWidth={1.8} /><span>{label}</span><span className="nav-count">{id === 'settings' ? '' : counts[id]}</span>
             </button>
           ))}
         </nav>
@@ -259,8 +335,8 @@ export function App() {
       <main className="main">
         <header className="topbar">
           <button className="icon-button menu-button" onClick={() => setSidebarOpen(true)} aria-label="メニュー"><Menu size={21} /></button>
-          <div className="search-wrap"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="タスクを検索..." aria-label="検索" />{query && <button onClick={() => setQuery('')} aria-label="検索をクリア"><X size={15} /></button>}</div>
-          <div className="top-actions"><a className="export-button" href="/api/export" download title="データを書き出す"><Download size={17} /></a><button className="add-button" onClick={openNew}><Plus size={18} /><span>新しく追加</span></button></div>
+          {view !== 'settings' ? <div className="search-wrap"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="タスクを検索..." aria-label="検索" />{query && <button onClick={() => setQuery('')} aria-label="検索をクリア"><X size={15} /></button>}</div> : <div className="topbar-context"><SettingsIcon size={17} />環境設定</div>}
+          {view !== 'settings' && <div className="top-actions"><a className="export-button" href="/api/export" download title="データを書き出す"><Download size={17} /></a><button className="add-button" onClick={openNew}><Plus size={18} /><span>新しく追加</span></button></div>}
         </header>
 
         <section className="content">
@@ -269,6 +345,7 @@ export function App() {
             <div className="date-card"><CalendarDays size={18} /><span>{new Intl.DateTimeFormat('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }).format(new Date())}</span></div>
           </div>
 
+          {view === 'settings' ? <SettingsPanel categories={categories} projects={projects} preferences={preferences} completedCount={counts.done} onPreferencesChange={setPreferences} onCreateCategory={createCategory} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onCreateProject={async (name, color) => { await createProject(name, color); }} onUpdateProject={updateProject} onDeleteProject={deleteProject} onClearCompleted={clearCompleted} /> : <>
           <div className="summary-strip" aria-label="進捗サマリー">
             <button onClick={() => navigate('today')}><span>今日</span><strong>{counts.today}</strong></button>
             <button onClick={() => navigate('upcoming')}><span>今後7日</span><strong>{counts.upcoming}</strong></button>
@@ -286,12 +363,12 @@ export function App() {
               </div>
             ) : <EmptyState view={view} hasQuery={Boolean(query)} onAdd={openNew} />}
           </div>
+          </>}
         </section>
       </main>
 
-      <button className="mobile-fab" onClick={openNew} aria-label="新しい項目を追加"><Plus size={24} /></button>
       <nav className="bottom-nav" aria-label="スマートフォン用メニュー">
-        {views.filter(({ id }) => id !== 'overdue').map(({ id, label, icon: Icon }) => (
+        {views.filter(({ id }) => ['today', 'upcoming', 'tasks', 'wishes', 'settings'].includes(id)).map(({ id, label, icon: Icon }) => (
           <button key={id} className={view === id ? 'active' : ''} onClick={() => navigate(id)} aria-current={view === id ? 'page' : undefined}>
             <span className="bottom-nav-icon"><Icon size={20} strokeWidth={1.8} />{counts[id] > 0 && <i>{counts[id] > 99 ? '99+' : counts[id]}</i>}</span>
             <span>{id === 'tasks' ? 'タスク' : id === 'wishes' ? 'やりたい' : id === 'upcoming' ? '予定' : label}</span>
@@ -299,10 +376,106 @@ export function App() {
         ))}
       </nav>
 
+      {view !== 'settings' && <button className="mobile-fab" onClick={openNew} aria-label="新しい項目を追加"><Plus size={24} /></button>}
       {composerOpen && <Composer categories={categories} projects={projects} initialItem={editingItem} defaultKind={view === 'wishes' ? 'wish' : 'task'} defaultToday={view === 'today'} onClose={() => { setComposerOpen(false); setEditingItem(null); }} onSubmit={editingItem ? updateItem : createItem} onCreateProject={createProject} />}
       {error && <div className="toast" role="alert"><span>{error}</span><button onClick={() => setError(null)}><X size={16} /></button></div>}
     </div>
   );
+}
+
+function SettingsPanel({ categories, projects, preferences, completedCount, onPreferencesChange, onCreateCategory, onUpdateCategory, onDeleteCategory, onCreateProject, onUpdateProject, onDeleteProject, onClearCompleted }: {
+  categories: Category[];
+  projects: Project[];
+  preferences: Preferences;
+  completedCount: number;
+  onPreferencesChange: React.Dispatch<React.SetStateAction<Preferences>>;
+  onCreateCategory: (name: string, color: string) => Promise<void>;
+  onUpdateCategory: (category: Category) => Promise<void>;
+  onDeleteCategory: (category: Category) => Promise<void>;
+  onCreateProject: (name: string, color: string) => Promise<void>;
+  onUpdateProject: (project: Project) => Promise<void>;
+  onDeleteProject: (project: Project) => Promise<void>;
+  onClearCompleted: () => Promise<void>;
+}) {
+  const [categoryName, setCategoryName] = useState('');
+  const [categoryColor, setCategoryColor] = useState('#657153');
+  const [projectName, setProjectName] = useState('');
+  const [projectColor, setProjectColor] = useState('#6f7c64');
+  const [notificationPermission, setNotificationPermission] = useState(() => 'Notification' in window ? Notification.permission : 'unsupported');
+
+  async function addCategory(event: React.FormEvent) {
+    event.preventDefault();
+    if (!categoryName.trim()) return;
+    try { await onCreateCategory(categoryName, categoryColor); setCategoryName(''); } catch { /* Toast is shown by App. */ }
+  }
+
+  async function addProject(event: React.FormEvent) {
+    event.preventDefault();
+    if (!projectName.trim()) return;
+    try { await onCreateProject(projectName, projectColor); setProjectName(''); } catch { /* Toast is shown by App. */ }
+  }
+
+  async function requestNotifications() {
+    if (!('Notification' in window)) return;
+    const permission = await Notification.requestPermission();
+    setNotificationPermission(permission);
+  }
+
+  return (
+    <div className="settings-grid">
+      <section className="settings-card">
+        <div className="settings-card-heading"><span><Palette size={18} /></span><div><h2>表示</h2><p>見た目と起動時の画面</p></div></div>
+        <div className="setting-field"><label htmlFor="default-view">最初に開く画面</label><select id="default-view" value={preferences.defaultView} onChange={(event) => onPreferencesChange((current) => ({ ...current, defaultView: event.target.value as Preferences['defaultView'] }))}><option value="today">今日</option><option value="upcoming">今後の予定</option><option value="tasks">すべてのタスク</option><option value="wishes">やりたいこと</option><option value="done">完了済み</option></select></div>
+        <div className="setting-field"><span>表示密度</span><div className="setting-segments"><button className={preferences.density === 'comfortable' ? 'active' : ''} onClick={() => onPreferencesChange((current) => ({ ...current, density: 'comfortable' }))}>ゆったり</button><button className={preferences.density === 'compact' ? 'active' : ''} onClick={() => onPreferencesChange((current) => ({ ...current, density: 'compact' }))}>コンパクト</button></div></div>
+        <div className="setting-field"><span>アクセントカラー</span><div className="accent-options">{(Object.keys(accentColors) as Accent[]).map((accent) => <button key={accent} className={preferences.accent === accent ? 'active' : ''} style={{ background: accentColors[accent].base }} onClick={() => onPreferencesChange((current) => ({ ...current, accent }))} aria-label={accent} />)}</div></div>
+      </section>
+
+      <section className="settings-card">
+        <div className="settings-card-heading"><span><Bell size={18} /></span><div><h2>通知</h2><p>期限を忘れないための通知</p></div></div>
+        <div className="setting-status"><div><strong>ブラウザ通知</strong><p>{notificationPermission === 'granted' ? '通知が許可されています。' : notificationPermission === 'denied' ? 'ブラウザの設定でブロックされています。' : notificationPermission === 'unsupported' ? 'このブラウザは通知に対応していません。' : '通知はまだ許可されていません。'}</p></div><button disabled={notificationPermission === 'granted' || notificationPermission === 'unsupported'} onClick={requestNotifications}>{notificationPermission === 'granted' ? '許可済み' : '通知を許可'}</button></div>
+        <p className="settings-hint">現在の通知は、MyManagerを開いている間に表示されます。</p>
+      </section>
+
+      <section className="settings-card settings-card--wide">
+        <div className="settings-card-heading"><span><Tags size={18} /></span><div><h2>カテゴリ</h2><p>タスクを横断して分類するラベル</p></div></div>
+        <form className="resource-create" onSubmit={addCategory}><input type="color" value={categoryColor} onChange={(event) => setCategoryColor(event.target.value)} aria-label="カテゴリ色" /><input value={categoryName} onChange={(event) => setCategoryName(event.target.value)} placeholder="新しいカテゴリ名" maxLength={40} /><button disabled={!categoryName.trim()}><Plus size={15} />追加</button></form>
+        <div className="resource-list">{categories.map((category) => <ResourceRow key={category.id} name={category.name} color={category.color} onSave={(name, color) => onUpdateCategory({ ...category, name, color })} onDelete={() => onDeleteCategory(category)} />)}</div>
+      </section>
+
+      <section className="settings-card settings-card--wide">
+        <div className="settings-card-heading"><span><Folder size={18} /></span><div><h2>プロジェクト</h2><p>複数のタスクを目的ごとにまとめる</p></div></div>
+        <form className="resource-create" onSubmit={addProject}><input type="color" value={projectColor} onChange={(event) => setProjectColor(event.target.value)} aria-label="プロジェクト色" /><input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="新しいプロジェクト名" maxLength={60} /><button disabled={!projectName.trim()}><Plus size={15} />追加</button></form>
+        <div className="resource-list">{projects.map((project) => <ResourceRow key={project.id} name={project.name} color={project.color} onSave={(name, color) => onUpdateProject({ ...project, name, color })} onArchive={() => onUpdateProject({ ...project, archived: 1 })} onDelete={() => onDeleteProject(project)} />)}</div>
+      </section>
+
+      <section className="settings-card">
+        <div className="settings-card-heading"><span><Database size={18} /></span><div><h2>データ管理</h2><p>バックアップと整理</p></div></div>
+        <div className="settings-actions"><a href="/api/export" download><Download size={16} /><span><strong>JSONを書き出す</strong><small>すべてのデータをバックアップ</small></span></a><button className="danger-action" disabled={!completedCount} onClick={onClearCompleted}><Trash2 size={16} /><span><strong>完了済みを削除</strong><small>{completedCount}件の完了データ</small></span></button></div>
+      </section>
+
+      <section className="settings-card">
+        <div className="settings-card-heading"><span><ShieldCheck size={18} /></span><div><h2>セキュリティ</h2><p>アクセス保護</p></div></div>
+        <div className="security-note"><ShieldCheck size={21} /><div><strong>Cloudflare Access</strong><p>本番環境はAccess側でログインを制限します。許可メールアドレスはCloudflareダッシュボードで管理してください。</p></div></div>
+      </section>
+    </div>
+  );
+}
+
+function ResourceRow({ name: initialName, color: initialColor, onSave, onDelete, onArchive }: { name: string; color: string; onSave: (name: string, color: string) => Promise<void>; onDelete: () => Promise<void>; onArchive?: () => Promise<void> }) {
+  const [name, setName] = useState(initialName);
+  const [color, setColor] = useState(initialColor);
+  const [saving, setSaving] = useState(false);
+  const changed = name.trim() !== initialName || color !== initialColor;
+
+  useEffect(() => { setName(initialName); setColor(initialColor); }, [initialColor, initialName]);
+
+  async function save() {
+    if (!name.trim() || !changed) return;
+    setSaving(true);
+    try { await onSave(name, color); } finally { setSaving(false); }
+  }
+
+  return <div className="resource-row"><input type="color" value={color} onChange={(event) => setColor(event.target.value)} aria-label="色" /><input value={name} onChange={(event) => setName(event.target.value)} maxLength={60} /><div className="resource-row-actions"><button disabled={!changed || saving} onClick={save} title="保存"><Save size={15} /></button>{onArchive && <button onClick={onArchive} title="アーカイブ"><Archive size={15} /></button>}<button className="danger" onClick={onDelete} title="削除"><Trash2 size={15} /></button></div></div>;
 }
 
 function ItemRow({ item, onToggle, onRemove, onEdit }: { item: Item; onToggle: (item: Item) => void; onRemove: (item: Item) => void; onEdit: (item: Item) => void }) {
