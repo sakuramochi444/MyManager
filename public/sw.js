@@ -1,4 +1,4 @@
-const CACHE = 'mymanager-v1';
+const CACHE = 'mymanager-v2';
 const SHELL = ['/', '/manifest.webmanifest', '/icons/icon.svg'];
 
 self.addEventListener('install', (event) => {
@@ -18,8 +18,17 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(fetch(request).catch(() => caches.match('/')));
     return;
   }
-  event.respondWith(caches.match(request).then((cached) => cached || fetch(request).then((response) => {
-    if (response.ok) caches.open(CACHE).then((cache) => cache.put(request, response.clone()));
+  event.respondWith((async () => {
+    const cached = await caches.match(request);
+    if (cached) return cached;
+
+    const response = await fetch(request);
+    if (!response.ok || response.type === 'opaque') return response;
+
+    // Clone before yielding: the browser may consume the original body as soon as it is returned.
+    const cacheResponse = response.clone();
+    const cache = await caches.open(CACHE);
+    await cache.put(request, cacheResponse);
     return response;
-  })));
+  })());
 });

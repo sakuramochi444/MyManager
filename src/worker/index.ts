@@ -43,8 +43,8 @@ api.post('/items', async (c) => {
     return c.json({ error: '入力内容を確認してください。' }, 400);
   }
   const result = await c.env.mymanager_db.prepare(
-    `INSERT INTO items (title, note, kind, priority, due_date, category_id, project_id, recurrence, reminder_at, sort_order)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+    `INSERT INTO items (title, note, kind, priority, due_date, category_id, project_id, recurrence, reminder_at, sort_order, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) RETURNING id`,
   ).bind(
     title, body.note?.trim() ?? '', body.kind, body.priority ?? 'medium', body.dueDate || null,
     body.categoryId || null, body.projectId || null, body.recurrence ?? 'none', body.reminderAt || null,
@@ -86,8 +86,8 @@ api.patch('/items/:id', async (c) => {
   if (status === 'done' && current.status === 'open' && recurrence !== 'none') {
     const dueDate = nextDate(body.dueDate === undefined ? current.due_date : body.dueDate, recurrence);
     const inserted = await db.prepare(
-      `INSERT INTO items (title, note, kind, priority, due_date, category_id, project_id, recurrence, reminder_at, sort_order)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?) RETURNING id`,
+      `INSERT INTO items (title, note, kind, priority, due_date, category_id, project_id, recurrence, reminder_at, sort_order, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, datetime('now')) RETURNING id`,
     ).bind(
       title, body.note ?? current.note, body.kind ?? current.kind, body.priority ?? current.priority, dueDate,
       body.categoryId === undefined ? current.category_id : body.categoryId || null,
