@@ -1,30 +1,106 @@
 # MyManager
 
-日々のタスクと「いつかやりたいこと」を一か所で管理する、個人向けWebアプリです。
+> 今日やることと、いつか叶えたいことを、同じ場所で無理なく管理する。
 
-## 主な機能
+日々のタスク、期限、プロジェクト、そして「いつかやりたいこと」をまとめて整理できる、個人向けのタスク管理Webアプリです。PCだけでなく、日常的に触れるスマートフォンでの使いやすさを重視して設計・開発しました。
 
-- 今日、今後7日、期限切れ、全タスク、やりたいこと、完了済みの一覧
-- タスクの追加・編集・完了・削除とクイック追加
-- 期限、優先度、カテゴリ、プロジェクト、メモ
-- 毎日・毎週・毎月の繰り返し（完了時に次回分を自動作成）
-- 優先度／プロジェクトの絞り込みと並び替え
-- ブラウザ通知、JSONバックアップ、完了済みの一括削除
-- スマートフォン対応とPWA（ホーム画面への追加）
+[Live Demo](https://mymanager.0404taichi8.workers.dev)
 
-## 技術構成
+## この作品について
 
-- React + TypeScript + Vite
-- Cloudflare Workers（API・静的サイト配信）
-- Cloudflare D1（SQLite互換データベース）
-- Hono（Worker API）
-- GitHub Actions（main ブランチから自動デプロイ）
+一般的なタスク管理ツールは高機能になるほど入力項目や画面遷移が増え、タスクを登録すること自体が負担になりがちです。MyManagerでは、思いついた瞬間に記録できる軽さと、期限・優先度・プロジェクトまで整理できる拡張性の両立を目指しました。
 
-D1はWorkerと同じCloudflare上で利用でき、小規模な個人用データをリレーショナルに扱いやすいため採用しています。
+画面を開いたときに最初に見えるのは「今日やること」です。必要な情報だけを段階的に見せることで、管理作業ではなく、目の前の行動に集中できる体験を意識しています。
 
-## ローカル開発
+## できること
 
-Node.js 22以上を用意してください。
+- 今日、今後7日、期限切れ、全タスクを目的別に確認
+- タイトルだけですぐ登録できるクイック追加
+- 期限、優先度、カテゴリ、プロジェクト、メモの設定
+- 毎日・毎週・毎月の繰り返しタスク
+- 「いつかやりたいこと」と通常タスクの分離
+- 優先度・プロジェクトによる絞り込みと並び替え
+- 完了状況のサマリーと完了済み項目の一括整理
+- 通知日時の設定とJSON形式のバックアップ
+- PWAとしてスマートフォンのホーム画面へ追加
+
+## UI / UXで意識したこと
+
+### 迷わず追加できること
+
+一覧上のクイック追加と、画面右下の追加ボタンを用意しました。詳細を決めきれていない段階でも一度記録し、あとから編集できます。
+
+### スマートフォンで片手操作できること
+
+主要画面は下部ナビゲーションから直接移動できます。入力画面はボトムシート形式にし、タップ領域、セーフエリア、ソフトウェアキーボード表示時のレイアウトまで調整しています。
+
+iOSで入力欄が自動拡大されないよう文字サイズを16px以上に保ちつつ、利用者自身のピンチズームは制限しない設計です。
+
+### 情報量を段階的に増やすこと
+
+一覧ではタイトルを主役にし、プロジェクト、期限、繰り返し、通知などの補助情報は小さなメタ情報としてまとめています。詳細設定は追加・編集画面に集約しました。
+
+## 技術的な特徴
+
+- フロントエンドとAPIを一つのCloudflare Workerから配信
+- Cloudflare D1によるSQLite互換のデータ永続化
+- D1マイグレーションによるスキーマ変更の管理
+- タスク完了時に次回分を生成する繰り返し処理
+- 操作直後に画面へ反映し、失敗時に戻すOptimistic UI
+- APIをキャッシュ対象外にしたService Worker設計
+- GitHubの`main`へのPushを起点とした自動マイグレーション・デプロイ
+- TypeScriptの共有型によるフロントエンドとAPI間の整合性確保
+
+## アーキテクチャ
+
+```mermaid
+flowchart LR
+    User[Browser / PWA] --> Worker[Cloudflare Worker]
+    Worker --> UI[React Static Assets]
+    Worker --> API[Hono API]
+    API --> D1[(Cloudflare D1)]
+    GitHub[GitHub main] --> Actions[GitHub Actions]
+    Actions --> Migration[D1 Migration]
+    Actions --> Worker
+```
+
+Cloudflare内で静的配信、API、データベースを完結させることで、個人開発でも運用箇所を増やさず、低い管理コストで公開できる構成にしています。
+
+## 使用技術
+
+| 分類 | 技術 | 用途 |
+| --- | --- | --- |
+| Frontend | React / TypeScript | UIと状態管理 |
+| Styling | CSS | レスポンシブUI、モバイル最適化 |
+| Build | Vite | 開発環境と本番ビルド |
+| API | Hono / Cloudflare Workers | CRUD APIと静的配信 |
+| Database | Cloudflare D1 | タスク、カテゴリ、プロジェクトの保存 |
+| PWA | Web App Manifest / Service Worker | ホーム画面追加とアプリシェルのキャッシュ |
+| CI/CD | GitHub Actions / Wrangler | 型チェック、DB更新、自動デプロイ |
+
+## 実装で工夫した点
+
+### 繰り返しタスク
+
+繰り返しタスクを完了した時点で、現在の項目は完了履歴として残しながら、設定された周期に応じて次回分を自動生成します。履歴と次の予定を両立できる構造にしています。
+
+### D1マイグレーション
+
+ローカルSQLiteと本番D1の差異を考慮し、カラム追加時に非定数のデフォルト式へ依存しないマイグレーションにしています。GitHub Actionsではアプリのデプロイ前にマイグレーションを適用します。
+
+### Service Worker
+
+画面を構成する静的ファイルだけをキャッシュし、タスクAPIは常にネットワークへ接続します。レスポンス本文を安全に複製してからキャッシュすることで、ストリームの二重消費も防いでいます。
+
+## 現在のスコープ
+
+本作品は一人で使うパーソナルツールとして設計しています。データは複数端末から同じD1へ同期されますが、アプリ内に複数ユーザー向けのアカウント機能はありません。個人データを保存して運用する場合は、Cloudflare Accessで利用者を制限する想定です。
+
+今後の拡張候補として、Web Pushによるバックグラウンド通知、バックアップからの復元、ユーザーごとのデータ分離を想定しています。
+
+## ローカルで動かす
+
+Node.js 22以上を使用します。
 
 ```bash
 npm install
@@ -32,51 +108,26 @@ npm run db:migrate:local
 npm run dev
 ```
 
-開発サーバーのURLは起動時に表示されます。ローカルのD1データは `.wrangler/` 以下に保存されます。
+ローカルのD1データは`.wrangler/`以下に保存されます。
 
-## Cloudflareへの初回デプロイ
-
-1. Cloudflareにログインします。
-
-   ```bash
-   npx wrangler login
-   ```
-
-2. D1データベースを作成します。
-
-   ```bash
-   npx wrangler d1 create mymanager-db
-   ```
-
-3. コマンド出力の `database_id` とD1バインディングが `wrangler.jsonc` の設定と一致していることを確認します（このプロジェクトのバインディング名は `mymanager_db` です）。
-
-4. マイグレーションとデプロイを実行します。
-
-   ```bash
-   npm run db:migrate:remote
-   npm run deploy
-   ```
-
-## GitHub Actionsの設定
-
-GitHubリポジトリの **Settings → Secrets and variables → Actions** に、次のRepository secretを登録します。
-
-- `CLOUDFLARE_API_TOKEN`: Workers Scriptsの編集とD1の編集権限を持つAPIトークン
-- Cloudflare Account IDはWorkflowに設定済みです。別アカウントへ移す場合だけ `.github/workflows/deploy.yml` を変更してください。
-
-以後は `main` ブランチへのpushで、型チェック、D1マイグレーション、デプロイが自動実行されます。
-
-## 公開時の注意
-
-現在の初期版は「一人で使うアプリ」を想定しており、アプリ内ログイン機能はありません。そのまま公開するとURLを知っている人がデータを操作できるため、Cloudflare Zero TrustのAccessポリシーで自分のメールアドレスだけを許可してください。複数ユーザーで利用する場合は、ユーザー認証と各テーブルの所有者IDを追加する必要があります。
-
-## コマンド
+## 主なコマンド
 
 | コマンド | 内容 |
 | --- | --- |
-| `npm run dev` | ローカル開発サーバー |
+| `npm run dev` | ローカル開発サーバーを起動 |
 | `npm run check` | TypeScriptの型チェック |
-| `npm run build` | 本番ビルド |
-| `npm run db:migrate:local` | ローカルD1へマイグレーション |
-| `npm run db:migrate:remote` | 本番D1へマイグレーション |
+| `npm run build` | 本番用にビルド |
+| `npm run db:migrate:local` | ローカルD1へマイグレーションを適用 |
+| `npm run db:migrate:remote` | 本番D1へマイグレーションを適用 |
 | `npm run deploy` | Cloudflareへデプロイ |
+
+## CI/CD
+
+GitHub Actionsは`main`ブランチへのPushを検知し、次の順序で本番環境を更新します。
+
+1. 依存関係の再現
+2. TypeScriptの型チェック
+3. D1マイグレーション
+4. Cloudflare Workersへのデプロイ
+
+リポジトリのActions Secretには、Workers ScriptsとD1の編集権限を持つ`CLOUDFLARE_API_TOKEN`を設定します。
