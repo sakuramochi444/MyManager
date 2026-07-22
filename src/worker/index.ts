@@ -338,6 +338,30 @@ api.delete('/push/subscriptions', async (c) => {
   return c.body(null, 204);
 });
 
+api.get('/push/preferences', async (c) => {
+  const endpoint = c.req.query('endpoint');
+  if (!endpoint) return c.json({ error: '通知購読が見つかりません。' }, 400);
+  const preferences = await c.env.mymanager_db.prepare(`SELECT due_enabled AS dueEnabled, daily_enabled AS dailyEnabled,
+    daily_time AS dailyTime, quiet_start AS quietStart, quiet_end AS quietEnd, quiet_enabled AS quietEnabled FROM push_subscriptions WHERE endpoint = ?`).bind(endpoint).first();
+  if (!preferences) return c.json({ error: '通知購読が見つかりません。' }, 404);
+  return c.json(preferences);
+});
+
+api.patch('/push/preferences', async (c) => {
+  const body = await c.req.json<{ endpoint?: string; dueEnabled?: boolean; dailyEnabled?: boolean; dailyTime?: string; quietStart?: string; quietEnd?: string; quietEnabled?: boolean }>();
+  if (!body.endpoint) return c.json({ error: '通知購読が見つかりません。' }, 400);
+  const time = (value: unknown, fallback: string) => typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value) ? value : fallback;
+  const current = await c.env.mymanager_db.prepare('SELECT * FROM push_subscriptions WHERE endpoint = ?').bind(body.endpoint).first<ItemRow>();
+  if (!current) return c.json({ error: '通知購読が見つかりません。' }, 404);
+  await c.env.mymanager_db.prepare(`UPDATE push_subscriptions SET due_enabled = ?, daily_enabled = ?, daily_time = ?, quiet_start = ?, quiet_end = ?, quiet_enabled = ? WHERE endpoint = ?`).bind(
+    body.dueEnabled === undefined ? current.due_enabled : body.dueEnabled ? 1 : 0,
+    body.dailyEnabled === undefined ? current.daily_enabled : body.dailyEnabled ? 1 : 0,
+    time(body.dailyTime, String(current.daily_time)), time(body.quietStart, String(current.quiet_start)), time(body.quietEnd, String(current.quiet_end)),
+    body.quietEnabled === undefined ? current.quiet_enabled : body.quietEnabled ? 1 : 0, body.endpoint,
+  ).run();
+  return c.json({ updated: true });
+});
+
 api.get('/export', async (c) => {
   const db = c.env.mymanager_db;
   const [items, categories, projects, subtasks, notes] = await Promise.all([
@@ -396,20 +420,32 @@ api.onError((error, c) => {
 
 async function processScheduledNotifications(env: Bindings) {
   if (!env.VAPID_PRIVATE_JWK) return;
-  const subscriptionResult = await env.mymanager_db.prepare('SELECT id, endpoint, timezone_offset AS timezoneOffset FROM push_subscriptions ORDER BY id').all<Record<string, unknown>>();
+  const subscriptionResult = await env.mymanager_db.prepare(`SELECT id, endpoint, timezone_offset AS timezoneOffset, due_enabled AS dueEnabled,
+    daily_enabled AS dailyEnabled, daily_time AS dailyTime, quiet_start AS quietStart, quiet_end AS quietEnd, quiet_enabled AS quietEnabled, last_daily_date AS lastDailyDate
+    FROM push_subscriptions ORDER BY id`).all<Record<string, unknown>>();
   if (!subscriptionResult.results.length) return;
-  const timezoneOffset = Number(subscriptionResult.results[0].timezoneOffset ?? 0);
-  const due = await env.mymanager_db.prepare(`SELECT id FROM items WHERE status = 'open' AND deleted_at IS NULL AND reminder_at IS NOT NULL
-    AND notification_sent_at IS NULL AND datetime(reminder_at, printf('%+d minutes', ?)) <= datetime('now') LIMIT 50`).bind(timezoneOffset).all<{ id: number }>();
-  if (!due.results.length) return;
-  const statuses = await Promise.all(subscriptionResult.results.map(async (subscription) => ({
-    id: Number(subscription.id), status: await sendPush(String(subscription.endpoint), env).catch(() => 0),
-  })));
+  const statuses = await Promise.all(subscriptionResult.results.map(async (subscription) => {
+    const timezoneOffset = Number(subscription.timezoneOffset ?? 0);
+    const localNow = new Date(Date.now() - timezoneOffset * 60_000);
+    const localTime = `${String(localNow.getUTCHours()).padStart(2, '0')}:${String(localNow.getUTCMinutes()).padStart(2, '0')}`;
+    const localDate = localNow.toISOString().slice(0, 10);
+    const quietStart = String(subscription.quietStart ?? '22:00');
+    const quietEnd = String(subscription.quietEnd ?? '07:00');
+    const quiet = Number(subscription.quietEnabled) && quietStart !== quietEnd && (quietStart < quietEnd ? localTime >= quietStart && localTime < quietEnd : localTime >= quietStart || localTime < quietEnd);
+    if (quiet) return { id: Number(subscription.id), status: 0, dueIds: [] as number[], dailyDate: null as string | null };
+    const due = Number(subscription.dueEnabled) ? await env.mymanager_db.prepare(`SELECT id FROM items WHERE status = 'open' AND deleted_at IS NULL AND reminder_at IS NOT NULL
+      AND notification_sent_at IS NULL AND datetime(reminder_at, printf('%+d minutes', ?)) <= datetime('now') LIMIT 50`).bind(timezoneOffset).all<{ id: number }>() : { results: [] };
+    const daily = Number(subscription.dailyEnabled) && localTime >= String(subscription.dailyTime ?? '09:00') && subscription.lastDailyDate !== localDate;
+    if (!due.results.length && !daily) return { id: Number(subscription.id), status: 0, dueIds: [] as number[], dailyDate: null as string | null };
+    return { id: Number(subscription.id), status: await sendPush(String(subscription.endpoint), env).catch(() => 0), dueIds: due.results.map(({ id }) => id), dailyDate: daily ? localDate : null };
+  }));
   const expired = statuses.filter(({ status }) => status === 404 || status === 410);
   if (expired.length) await env.mymanager_db.batch(expired.map(({ id }) => env.mymanager_db.prepare('DELETE FROM push_subscriptions WHERE id = ?').bind(id)));
-  if (statuses.some(({ status }) => status >= 200 && status < 300)) {
-    await env.mymanager_db.batch(due.results.map(({ id }) => env.mymanager_db.prepare("UPDATE items SET notification_sent_at = datetime('now') WHERE id = ?").bind(id)));
-  }
+  const successful = statuses.filter(({ status }) => status >= 200 && status < 300);
+  const dueIds = [...new Set(successful.flatMap(({ dueIds }) => dueIds))];
+  const updates = dueIds.map((id) => env.mymanager_db.prepare("UPDATE items SET notification_sent_at = datetime('now') WHERE id = ?").bind(id));
+  successful.filter(({ dailyDate }) => dailyDate).forEach(({ id, dailyDate }) => updates.push(env.mymanager_db.prepare('UPDATE push_subscriptions SET last_daily_date = ? WHERE id = ?').bind(dailyDate, id)));
+  if (updates.length) await env.mymanager_db.batch(updates);
 }
 
 export default {

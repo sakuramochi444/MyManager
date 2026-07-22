@@ -188,7 +188,11 @@ button { color: inherit; }
 .setting-field { min-height: 52px; padding: 12px 0; border-bottom: 1px solid #eceae4; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .setting-field:last-child { border-bottom: 0; padding-bottom: 0; }
 .setting-field > label, .setting-field > span { color: #62645b; font-size: 10px; font-weight: 500; }
+.setting-field > span:has(strong) { display: grid; gap: 4px; }.setting-field > span strong { font-size: 10px; font-weight: 600; }.setting-field > span small { color: #989a90; font-size: 8px; font-weight: 400; }
 .setting-field select { max-width: 180px; border: 1px solid #dcdbd3; border-radius: 7px; padding: 8px 29px 8px 10px; outline: 0; background: #fff; color: #55574f; font-size: 10px; }
+.setting-field > input[type='time'], .quiet-hours input { min-height: 36px; border: 1px solid #dcdbd3; border-radius: 7px; padding: 6px 9px; outline: 0; background: #fff; color: #55574f; font-size: 10px; }
+.setting-toggle { position: relative; width: 42px; height: 24px; flex: 0 0 auto; border: 0; border-radius: 13px; padding: 0; background: #d8d8d1; cursor: pointer; transition: background .18s; }.setting-toggle i { position: absolute; left: 3px; top: 3px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(30,31,27,.2); transition: transform .18s; }.setting-toggle.active { background: var(--green); }.setting-toggle.active i { transform: translateX(18px); }
+.notification-preferences { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 28px; }.notification-preferences .setting-field { min-height: 66px; }.quiet-hours > div { display: flex; align-items: center; gap: 7px; color: #96978e; }.notification-locked { min-height: 100px; padding: 18px; border: 1px dashed #dad8d0; border-radius: 9px; background: #faf9f5; color: #9b9c94; display: flex; align-items: center; justify-content: center; gap: 12px; }.notification-locked strong { color: #5e6057; font-size: 10px; }.notification-locked p { margin: 4px 0 0; font-size: 9px; }
 .setting-segments { padding: 3px; border-radius: 7px; display: flex; gap: 2px; background: #efede7; }
 .setting-segments button { border: 0; border-radius: 5px; padding: 6px 10px; background: transparent; color: #87887f; cursor: pointer; font-size: 9px; }
 .setting-segments button.active { background: #fff; color: var(--green-dark); box-shadow: 0 1px 4px rgba(40,41,36,.1); }
@@ -341,10 +345,12 @@ button { color: inherit; }
   .settings-card-heading p { font-size: 10px; }
   .setting-field { min-height: 58px; }
   .setting-field > label, .setting-field > span { font-size: 11px; }
+  .setting-field > span strong { font-size: 11px; }.setting-field > span small { font-size: 9px; line-height: 1.45; }
   .setting-field select { min-height: 40px; max-width: 170px; font-size: 16px; }
   .setting-segments button { min-height: 36px; padding: 6px 11px; font-size: 10px; }
   .setting-status strong { font-size: 11px; }.setting-status p, .settings-hint { font-size: 10px; }
   .setting-status button { min-height: 40px; font-size: 10px; }
+  .notification-preferences { grid-template-columns: 1fr; }.setting-field > input[type='time'], .quiet-hours input { min-height: 42px; font-size: 16px; }.quiet-hours { align-items: flex-start; flex-direction: column; }.quiet-hours > div { width: 100%; }.quiet-hours input { min-width: 0; flex: 1; }
   .resource-create { grid-template-columns: 38px 1fr; }
   .resource-create input:not([type='color']), .resource-row input:not([type='color']) { height: 42px; font-size: 16px; }
   .resource-create button { grid-column: 1 / -1; height: 42px; justify-content: center; font-size: 11px; }

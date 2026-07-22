@@ -49,9 +49,10 @@ type View = 'dashboard' | 'calendar' | 'today' | 'upcoming' | 'overdue' | 'tasks
 type Sort = 'smart' | 'due' | 'priority' | 'created';
 type Accent = 'sage' | 'blue' | 'terracotta';
 type Density = 'comfortable' | 'compact';
-interface Preferences { defaultView: Exclude<View, 'settings' | 'trash'>; accent: Accent; density: Density; dailyGoal: number }
+interface Preferences { defaultView: Exclude<View, 'settings' | 'trash'>; accent: Accent; density: Density; dailyGoal: number; foregroundNotifications: boolean }
+interface PushPreferences { dueEnabled: boolean; dailyEnabled: boolean; dailyTime: string; quietStart: string; quietEnd: string; quietEnabled: boolean }
 
-const defaultPreferences: Preferences = { defaultView: 'today', accent: 'sage', density: 'comfortable', dailyGoal: 3 };
+const defaultPreferences: Preferences = { defaultView: 'today', accent: 'sage', density: 'comfortable', dailyGoal: 3, foregroundNotifications: true };
 const accentColors: Record<Accent, { base: string; dark: string }> = {
   sage: { base: '#58634a', dark: '#414b36' },
   blue: { base: '#49677e', dark: '#354f64' },
@@ -484,7 +485,7 @@ export function App() {
   }
 
   useEffect(() => {
-    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    if (!preferences.foregroundNotifications || !('Notification' in window) || Notification.permission !== 'granted') return;
     const check = () => {
       const notified = new Set(JSON.parse(sessionStorage.getItem('mymanager-notified') ?? '[]') as number[]);
       const now = new Date().toISOString().slice(0, 16);
@@ -497,7 +498,7 @@ export function App() {
     check();
     const timer = window.setInterval(check, 30_000);
     return () => window.clearInterval(timer);
-  }, [items]);
+  }, [items, preferences.foregroundNotifications]);
 
   return (
     <div className={`app-shell density-${preferences.density}`}>
@@ -734,6 +735,8 @@ function SettingsPanel({ categories, projects, preferences, completedCount, tras
   const [projectColor, setProjectColor] = useState('#6f7c64');
   const [notificationPermission, setNotificationPermission] = useState(() => 'Notification' in window ? Notification.permission : 'unsupported');
   const [pushStatus, setPushStatus] = useState<'checking' | 'enabled' | 'disabled' | 'unconfigured' | 'unsupported'>('checking');
+  const [pushEndpoint, setPushEndpoint] = useState<string | null>(null);
+  const [pushPreferences, setPushPreferences] = useState<PushPreferences>({ dueEnabled: true, dailyEnabled: false, dailyTime: '09:00', quietStart: '22:00', quietEnd: '07:00', quietEnabled: true });
 
   useEffect(() => {
     if (!('serviceWorker' in navigator) || !('PushManager' in window)) { setPushStatus('unsupported'); return; }
@@ -742,7 +745,12 @@ function SettingsPanel({ categories, projects, preferences, completedCount, tras
         const config = await request<{ configured: boolean }>('/api/push/config');
         if (!config.configured) { setPushStatus('unconfigured'); return; }
         const registration = await navigator.serviceWorker.ready;
-        setPushStatus(await registration.pushManager.getSubscription() ? 'enabled' : 'disabled');
+        const subscription = await registration.pushManager.getSubscription();
+        if (!subscription) { setPushStatus('disabled'); return; }
+        setPushEndpoint(subscription.endpoint);
+        const stored = await request<{ dueEnabled: number; dailyEnabled: number; dailyTime: string; quietStart: string; quietEnd: string; quietEnabled: number }>(`/api/push/preferences?endpoint=${encodeURIComponent(subscription.endpoint)}`);
+        setPushPreferences({ ...stored, dueEnabled: Boolean(stored.dueEnabled), dailyEnabled: Boolean(stored.dailyEnabled), quietEnabled: Boolean(stored.quietEnabled) });
+        setPushStatus('enabled');
       } catch { setPushStatus('disabled'); }
     })();
   }, []);
@@ -772,7 +780,7 @@ function SettingsPanel({ categories, projects, preferences, completedCount, tras
       const current = await registration.pushManager.getSubscription();
       if (current) {
         await request<void>('/api/push/subscriptions', { method: 'DELETE', body: JSON.stringify({ endpoint: current.endpoint }) });
-        await current.unsubscribe(); setPushStatus('disabled'); return;
+        await current.unsubscribe(); setPushEndpoint(null); setPushStatus('disabled'); return;
       }
       const permission = await Notification.requestPermission();
       setNotificationPermission(permission);
@@ -781,8 +789,26 @@ function SettingsPanel({ categories, projects, preferences, completedCount, tras
       if (!config.configured || !config.publicKey) { setPushStatus('unconfigured'); return; }
       const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(config.publicKey) });
       await request('/api/push/subscriptions', { method: 'POST', body: JSON.stringify({ ...subscription.toJSON(), endpoint: subscription.endpoint, timezoneOffset: new Date().getTimezoneOffset() }) });
+      setPushEndpoint(subscription.endpoint);
       setPushStatus('enabled');
     } catch (reason) { window.alert((reason as Error).message); }
+  }
+
+  async function updatePushPreferences(patch: Partial<PushPreferences>) {
+    if (!pushEndpoint) return;
+    const next = { ...pushPreferences, ...patch };
+    setPushPreferences(next);
+    try { await request('/api/push/preferences', { method: 'PATCH', body: JSON.stringify({ endpoint: pushEndpoint, ...next }) }); }
+    catch (reason) { setPushPreferences(pushPreferences); window.alert((reason as Error).message); }
+  }
+
+  async function testNotification() {
+    if (!('serviceWorker' in navigator)) return;
+    const permission = await Notification.requestPermission();
+    setNotificationPermission(permission);
+    if (permission !== 'granted') return;
+    const registration = await navigator.serviceWorker.ready;
+    await registration.showNotification('MyManager テスト通知', { body: '通知設定は正常に動作しています。', icon: '/icons/icon.svg', tag: 'mymanager-test' });
   }
 
   return (
@@ -799,7 +825,20 @@ function SettingsPanel({ categories, projects, preferences, completedCount, tras
         <div className="settings-card-heading"><span><Bell size={18} /></span><div><h2>通知</h2><p>期限を忘れないための通知</p></div></div>
         <div className="setting-status"><div><strong>ブラウザ通知</strong><p>{notificationPermission === 'granted' ? '通知が許可されています。' : notificationPermission === 'denied' ? 'ブラウザの設定でブロックされています。' : notificationPermission === 'unsupported' ? 'このブラウザは通知に対応していません。' : '通知はまだ許可されていません。'}</p></div><button disabled={notificationPermission === 'granted' || notificationPermission === 'unsupported'} onClick={requestNotifications}>{notificationPermission === 'granted' ? '許可済み' : '通知を許可'}</button></div>
         <div className="setting-status"><div><strong>バックグラウンド通知</strong><p>{pushStatus === 'enabled' ? 'アプリを閉じていても通知します。' : pushStatus === 'unconfigured' ? 'VAPID秘密鍵の設定後に利用できます。' : pushStatus === 'unsupported' ? 'この環境はWeb Pushに対応していません。' : '期限通知をバックグラウンドで受け取ります。'}</p></div><button disabled={pushStatus === 'checking' || pushStatus === 'unconfigured' || pushStatus === 'unsupported'} onClick={toggleBackgroundNotifications}>{pushStatus === 'enabled' ? '解除する' : '有効にする'}</button></div>
+        <div className="setting-field"><span>アプリを開いている間も通知</span><button className={`setting-toggle ${preferences.foregroundNotifications ? 'active' : ''}`} onClick={() => onPreferencesChange((current) => ({ ...current, foregroundNotifications: !current.foregroundNotifications }))} aria-pressed={preferences.foregroundNotifications}><i /></button></div>
+        <div className="setting-status"><div><strong>テスト通知</strong><p>この端末で通知が表示されるか確認します。</p></div><button disabled={notificationPermission === 'unsupported'} onClick={testNotification}>通知を試す</button></div>
         <p className="settings-hint">バックグラウンド通知はインストール済みPWAでも利用できます。</p>
+      </section>
+
+      <section className="settings-card settings-card--wide">
+        <div className="settings-card-heading"><span><SlidersHorizontal size={18} /></span><div><h2>通知の詳細</h2><p>この端末で受け取る通知と時間帯</p></div></div>
+        {pushStatus === 'enabled' ? <div className="notification-preferences">
+          <div className="setting-field"><span><strong>期限通知</strong><small>タスクに設定した通知日時にお知らせ</small></span><button className={`setting-toggle ${pushPreferences.dueEnabled ? 'active' : ''}`} onClick={() => void updatePushPreferences({ dueEnabled: !pushPreferences.dueEnabled })} aria-pressed={pushPreferences.dueEnabled}><i /></button></div>
+          <div className="setting-field"><span><strong>毎日の応援通知</strong><small>1日1回、タスクを確認するきっかけを通知</small></span><button className={`setting-toggle ${pushPreferences.dailyEnabled ? 'active' : ''}`} onClick={() => void updatePushPreferences({ dailyEnabled: !pushPreferences.dailyEnabled })} aria-pressed={pushPreferences.dailyEnabled}><i /></button></div>
+          {pushPreferences.dailyEnabled && <div className="setting-field"><label htmlFor="daily-notification-time">応援通知の時刻</label><input id="daily-notification-time" type="time" value={pushPreferences.dailyTime} onChange={(event) => void updatePushPreferences({ dailyTime: event.target.value })} /></div>}
+          <div className="setting-field"><span><strong>通知しない時間帯</strong><small>静かに過ごしたい時間は通知を翌時間帯まで保留</small></span><button className={`setting-toggle ${pushPreferences.quietEnabled ? 'active' : ''}`} onClick={() => void updatePushPreferences({ quietEnabled: !pushPreferences.quietEnabled })} aria-pressed={pushPreferences.quietEnabled}><i /></button></div>
+          {pushPreferences.quietEnabled && <div className="setting-field quiet-hours"><span>開始と終了</span><div><input type="time" value={pushPreferences.quietStart} onChange={(event) => void updatePushPreferences({ quietStart: event.target.value })} /><span>〜</span><input type="time" value={pushPreferences.quietEnd} onChange={(event) => void updatePushPreferences({ quietEnd: event.target.value })} /></div></div>}
+        </div> : <div className="notification-locked"><Bell size={20} /><div><strong>バックグラウンド通知を有効にしてください</strong><p>有効化すると、通知の種類と時間帯を細かく設定できます。</p></div></div>}
       </section>
 
       <section className="settings-card settings-card--wide">
