@@ -11,6 +11,9 @@ import {
   Edit3,
   Folder,
   Archive,
+  ArrowRight,
+  BarChart3,
+  Clock3,
   Database,
   LayoutList,
   Menu,
@@ -24,13 +27,14 @@ import {
   SlidersHorizontal,
   Sparkles,
   Tags,
+  Target,
   Palette,
   Trash2,
   X,
 } from 'lucide-react';
 import type { Category, Item, ItemInput, ItemKind, ItemUpdateResult, Priority, Project, Recurrence } from '../shared/types';
 
-type View = 'today' | 'upcoming' | 'overdue' | 'tasks' | 'wishes' | 'done' | 'settings';
+type View = 'dashboard' | 'today' | 'upcoming' | 'overdue' | 'tasks' | 'wishes' | 'done' | 'settings';
 type Sort = 'smart' | 'due' | 'priority' | 'created';
 type Accent = 'sage' | 'blue' | 'terracotta';
 type Density = 'comfortable' | 'compact';
@@ -49,6 +53,7 @@ function loadPreferences(): Preferences {
 }
 
 const views: { id: View; label: string; icon: typeof Circle }[] = [
+  { id: 'dashboard', label: 'ダッシュボード', icon: BarChart3 },
   { id: 'today', label: '今日', icon: CalendarDays },
   { id: 'upcoming', label: '今後の予定', icon: CalendarDays },
   { id: 'overdue', label: '期限切れ', icon: Bell },
@@ -59,6 +64,7 @@ const views: { id: View; label: string; icon: typeof Circle }[] = [
 ];
 
 const viewCopy: Record<View, { title: string; subtitle: string }> = {
+  dashboard: { title: 'ダッシュボード', subtitle: '今の状況と、次に取り組むことを見渡せます。' },
   today: { title: '今日', subtitle: '今日やることに、静かに集中しましょう。' },
   upcoming: { title: '今後の予定', subtitle: 'これから一週間の予定を見渡せます。' },
   overdue: { title: '期限切れ', subtitle: '残っていることを整理して、すっきりさせましょう。' },
@@ -156,6 +162,7 @@ export function App() {
   }, [items, priorityFilter, projectFilter, query, sort, view]);
 
   const counts = useMemo(() => ({
+    dashboard: 0,
     today: items.filter((item) => item.status === 'open' && item.kind === 'task' && item.dueDate === localDate()).length,
     upcoming: items.filter((item) => item.status === 'open' && item.kind === 'task' && Boolean(item.dueDate && item.dueDate > localDate() && item.dueDate <= dateAfter(7))).length,
     overdue: items.filter((item) => item.status === 'open' && item.kind === 'task' && Boolean(item.dueDate && item.dueDate < localDate())).length,
@@ -320,7 +327,7 @@ export function App() {
           <p className="nav-label">管理</p>
           {views.map(({ id, label, icon: Icon }) => (
             <button key={id} className={`nav-item ${view === id ? 'nav-item--active' : ''}`} onClick={() => navigate(id)}>
-              <Icon size={18} strokeWidth={1.8} /><span>{label}</span><span className="nav-count">{id === 'settings' ? '' : counts[id]}</span>
+              <Icon size={18} strokeWidth={1.8} /><span>{label}</span><span className="nav-count">{id === 'settings' || id === 'dashboard' ? '' : counts[id]}</span>
             </button>
           ))}
         </nav>
@@ -335,7 +342,7 @@ export function App() {
       <main className="main">
         <header className="topbar">
           <button className="icon-button menu-button" onClick={() => setSidebarOpen(true)} aria-label="メニュー"><Menu size={21} /></button>
-          {view !== 'settings' ? <div className="search-wrap"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="タスクを検索..." aria-label="検索" />{query && <button onClick={() => setQuery('')} aria-label="検索をクリア"><X size={15} /></button>}</div> : <div className="topbar-context"><SettingsIcon size={17} />環境設定</div>}
+          {view !== 'settings' && view !== 'dashboard' ? <div className="search-wrap"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="タスクを検索..." aria-label="検索" />{query && <button onClick={() => setQuery('')} aria-label="検索をクリア"><X size={15} /></button>}</div> : <div className="topbar-context">{view === 'settings' ? <SettingsIcon size={17} /> : <BarChart3 size={17} />}{view === 'settings' ? '環境設定' : '全体サマリー'}</div>}
           {view !== 'settings' && <div className="top-actions"><a className="export-button" href="/api/export" download title="データを書き出す"><Download size={17} /></a><button className="add-button" onClick={openNew}><Plus size={18} /><span>新しく追加</span></button></div>}
         </header>
 
@@ -345,7 +352,7 @@ export function App() {
             <div className="date-card"><CalendarDays size={18} /><span>{new Intl.DateTimeFormat('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }).format(new Date())}</span></div>
           </div>
 
-          {view === 'settings' ? <SettingsPanel categories={categories} projects={projects} preferences={preferences} completedCount={counts.done} onPreferencesChange={setPreferences} onCreateCategory={createCategory} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onCreateProject={async (name, color) => { await createProject(name, color); }} onUpdateProject={updateProject} onDeleteProject={deleteProject} onClearCompleted={clearCompleted} /> : <>
+          {view === 'dashboard' ? <DashboardPanel items={items} projects={projects} onNavigate={navigate} onEdit={openEdit} /> : view === 'settings' ? <SettingsPanel categories={categories} projects={projects} preferences={preferences} completedCount={counts.done} onPreferencesChange={setPreferences} onCreateCategory={createCategory} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onCreateProject={async (name, color) => { await createProject(name, color); }} onUpdateProject={updateProject} onDeleteProject={deleteProject} onClearCompleted={clearCompleted} /> : <>
           <div className="summary-strip" aria-label="進捗サマリー">
             <button onClick={() => navigate('today')}><span>今日</span><strong>{counts.today}</strong></button>
             <button onClick={() => navigate('upcoming')}><span>今後7日</span><strong>{counts.upcoming}</strong></button>
@@ -368,7 +375,7 @@ export function App() {
       </main>
 
       <nav className="bottom-nav" aria-label="スマートフォン用メニュー">
-        {views.filter(({ id }) => ['today', 'upcoming', 'tasks', 'wishes', 'settings'].includes(id)).map(({ id, label, icon: Icon }) => (
+        {views.filter(({ id }) => ['dashboard', 'today', 'tasks', 'wishes', 'settings'].includes(id)).map(({ id, label, icon: Icon }) => (
           <button key={id} className={view === id ? 'active' : ''} onClick={() => navigate(id)} aria-current={view === id ? 'page' : undefined}>
             <span className="bottom-nav-icon"><Icon size={20} strokeWidth={1.8} />{counts[id] > 0 && <i>{counts[id] > 99 ? '99+' : counts[id]}</i>}</span>
             <span>{id === 'tasks' ? 'タスク' : id === 'wishes' ? 'やりたい' : id === 'upcoming' ? '予定' : label}</span>
@@ -381,6 +388,67 @@ export function App() {
       {error && <div className="toast" role="alert"><span>{error}</span><button onClick={() => setError(null)}><X size={16} /></button></div>}
     </div>
   );
+}
+
+function DashboardPanel({ items, projects, onNavigate, onEdit }: { items: Item[]; projects: Project[]; onNavigate: (view: View) => void; onEdit: (item: Item) => void }) {
+  const today = localDate();
+  const openTasks = items.filter((item) => item.kind === 'task' && item.status === 'open');
+  const completedItems = items.filter((item) => item.status === 'done');
+  const completedThisWeek = completedItems.filter((item) => item.completedAt && item.completedAt.slice(0, 10) >= dateAfter(-6));
+  const todayCount = openTasks.filter((item) => item.dueDate === today).length;
+  const overdueCount = openTasks.filter((item) => item.dueDate && item.dueDate < today).length;
+  const completionRate = items.length ? Math.round((completedItems.length / items.length) * 100) : 0;
+  const upcoming = openTasks.filter((item) => item.dueDate && item.dueDate >= today).sort((a, b) => a.dueDate!.localeCompare(b.dueDate!)).slice(0, 5);
+  const wishes = items.filter((item) => item.kind === 'wish' && item.status === 'open').sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 4);
+  const week = Array.from({ length: 7 }, (_, index) => {
+    const date = dateAfter(index - 6);
+    return {
+      date,
+      label: new Intl.DateTimeFormat('ja-JP', { weekday: 'short' }).format(new Date(`${date}T00:00:00`)),
+      count: completedItems.filter((item) => item.completedAt?.slice(0, 10) === date).length,
+    };
+  });
+  const maxCompleted = Math.max(1, ...week.map((day) => day.count));
+  const projectProgress = projects.map((project) => {
+    const related = items.filter((item) => item.projectId === project.id);
+    const done = related.filter((item) => item.status === 'done').length;
+    return { project, total: related.length, done, percent: related.length ? Math.round((done / related.length) * 100) : 0 };
+  }).filter((entry) => entry.total > 0).sort((a, b) => b.total - a.total).slice(0, 5);
+
+  return <div className="dashboard">
+    <div className="dashboard-metrics">
+      <button onClick={() => onNavigate('tasks')}><span className="metric-icon"><LayoutList size={18} /></span><div><small>未完了タスク</small><strong>{openTasks.length}</strong><em>件</em></div><ArrowRight size={15} /></button>
+      <button onClick={() => onNavigate('today')}><span className="metric-icon"><Target size={18} /></span><div><small>今日やること</small><strong>{todayCount}</strong><em>件</em></div><ArrowRight size={15} /></button>
+      <button className={overdueCount ? 'metric-danger' : ''} onClick={() => onNavigate('overdue')}><span className="metric-icon"><Bell size={18} /></span><div><small>期限切れ</small><strong>{overdueCount}</strong><em>件</em></div><ArrowRight size={15} /></button>
+      <button onClick={() => onNavigate('done')}><span className="metric-icon"><CheckCircle2 size={18} /></span><div><small>全体の完了率</small><strong>{completionRate}</strong><em>%</em></div><ArrowRight size={15} /></button>
+    </div>
+
+    <div className="dashboard-layout">
+      <section className="dashboard-card dashboard-card--activity">
+        <div className="dashboard-card-header"><div><p className="eyebrow">ACTIVITY</p><h2>直近7日の完了</h2></div><span className="activity-total"><strong>{completedThisWeek.length}</strong>件完了</span></div>
+        <div className="week-chart">{week.map((day) => <div className="chart-column" key={day.date}><span className="chart-value">{day.count || ''}</span><div className="chart-track"><i style={{ height: `${Math.max(day.count ? 14 : 3, (day.count / maxCompleted) * 100)}%` }} /></div><small>{day.label}</small></div>)}</div>
+      </section>
+
+      <section className="dashboard-card">
+        <div className="dashboard-card-header"><div><p className="eyebrow">UPCOMING</p><h2>次の予定</h2></div><button onClick={() => onNavigate('upcoming')}>すべて見る<ArrowRight size={13} /></button></div>
+        <div className="dashboard-list">{upcoming.length ? upcoming.map((item) => <button key={item.id} onClick={() => onEdit(item)}><span className="dashboard-date"><strong>{new Date(`${item.dueDate}T00:00:00`).getDate()}</strong><small>{new Intl.DateTimeFormat('ja-JP', { month: 'short' }).format(new Date(`${item.dueDate}T00:00:00`))}</small></span><span className="dashboard-list-body"><strong>{item.title}</strong><small>{item.projectName ?? item.categoryName ?? 'タスク'}</small></span><ArrowRight size={14} /></button>) : <DashboardEmpty icon={<CalendarDays size={19} />} text="予定されているタスクはありません" />}</div>
+      </section>
+
+      <section className="dashboard-card">
+        <div className="dashboard-card-header"><div><p className="eyebrow">PROJECTS</p><h2>プロジェクト進捗</h2></div><button onClick={() => onNavigate('settings')}>管理<SettingsIcon size={13} /></button></div>
+        <div className="project-progress-list">{projectProgress.length ? projectProgress.map(({ project, total, done, percent }) => <div key={project.id}><div className="project-progress-meta"><span><i style={{ background: project.color }} />{project.name}</span><small>{done}/{total} · {percent}%</small></div><div className="progress-track"><i style={{ width: `${percent}%`, background: project.color }} /></div></div>) : <DashboardEmpty icon={<Folder size={19} />} text="タスクのあるプロジェクトはまだありません" />}</div>
+      </section>
+
+      <section className="dashboard-card">
+        <div className="dashboard-card-header"><div><p className="eyebrow">SOMEDAY</p><h2>やりたいこと</h2></div><button onClick={() => onNavigate('wishes')}>すべて見る<ArrowRight size={13} /></button></div>
+        <div className="wish-preview">{wishes.length ? wishes.map((item) => <button key={item.id} onClick={() => onEdit(item)}><Sparkles size={14} /><span>{item.title}</span><ArrowRight size={13} /></button>) : <DashboardEmpty icon={<Sparkles size={19} />} text="やりたいことを追加してみましょう" />}</div>
+      </section>
+    </div>
+  </div>;
+}
+
+function DashboardEmpty({ icon, text }: { icon: React.ReactNode; text: string }) {
+  return <div className="dashboard-empty"><span>{icon}</span><p>{text}</p></div>;
 }
 
 function SettingsPanel({ categories, projects, preferences, completedCount, onPreferencesChange, onCreateCategory, onUpdateCategory, onDeleteCategory, onCreateProject, onUpdateProject, onDeleteProject, onClearCompleted }: {
@@ -425,7 +493,7 @@ function SettingsPanel({ categories, projects, preferences, completedCount, onPr
     <div className="settings-grid">
       <section className="settings-card">
         <div className="settings-card-heading"><span><Palette size={18} /></span><div><h2>表示</h2><p>見た目と起動時の画面</p></div></div>
-        <div className="setting-field"><label htmlFor="default-view">最初に開く画面</label><select id="default-view" value={preferences.defaultView} onChange={(event) => onPreferencesChange((current) => ({ ...current, defaultView: event.target.value as Preferences['defaultView'] }))}><option value="today">今日</option><option value="upcoming">今後の予定</option><option value="tasks">すべてのタスク</option><option value="wishes">やりたいこと</option><option value="done">完了済み</option></select></div>
+        <div className="setting-field"><label htmlFor="default-view">最初に開く画面</label><select id="default-view" value={preferences.defaultView} onChange={(event) => onPreferencesChange((current) => ({ ...current, defaultView: event.target.value as Preferences['defaultView'] }))}><option value="dashboard">ダッシュボード</option><option value="today">今日</option><option value="upcoming">今後の予定</option><option value="tasks">すべてのタスク</option><option value="wishes">やりたいこと</option><option value="done">完了済み</option></select></div>
         <div className="setting-field"><span>表示密度</span><div className="setting-segments"><button className={preferences.density === 'comfortable' ? 'active' : ''} onClick={() => onPreferencesChange((current) => ({ ...current, density: 'comfortable' }))}>ゆったり</button><button className={preferences.density === 'compact' ? 'active' : ''} onClick={() => onPreferencesChange((current) => ({ ...current, density: 'compact' }))}>コンパクト</button></div></div>
         <div className="setting-field"><span>アクセントカラー</span><div className="accent-options">{(Object.keys(accentColors) as Accent[]).map((accent) => <button key={accent} className={preferences.accent === accent ? 'active' : ''} style={{ background: accentColors[accent].base }} onClick={() => onPreferencesChange((current) => ({ ...current, accent }))} aria-label={accent} />)}</div></div>
       </section>
