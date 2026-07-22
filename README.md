@@ -38,7 +38,7 @@ npm run dev
    npx wrangler d1 create mymanager-db
    ```
 
-3. コマンド出力の `database_id` を `wrangler.jsonc` の `REPLACE_WITH_YOUR_D1_DATABASE_ID` と置き換えます。
+3. コマンド出力の `database_id` とD1バインディングが `wrangler.jsonc` の設定と一致していることを確認します（このプロジェクトのバインディング名は `mymanager_db` です）。
 
 4. マイグレーションとデプロイを実行します。
 
