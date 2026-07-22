@@ -1,18 +1,38 @@
 import { Hono } from 'hono';
-import type { ItemInput, ItemStatus } from '../shared/types';
+import type { ItemInput, ItemStatus, Recurrence } from '../shared/types';
 
 type Bindings = { mymanager_db: D1Database };
+type ItemRow = Record<string, unknown>;
 const api = new Hono<{ Bindings: Bindings }>().basePath('/api');
 
 const itemSelect = `
   SELECT i.id, i.title, i.note, i.kind, i.status, i.priority,
     i.due_date AS dueDate, i.category_id AS categoryId,
     c.name AS categoryName, c.color AS categoryColor,
+    i.project_id AS projectId, p.name AS projectName, p.color AS projectColor,
+    i.recurrence, i.reminder_at AS reminderAt, i.sort_order AS sortOrder,
     i.created_at AS createdAt, i.completed_at AS completedAt
-  FROM items i LEFT JOIN categories c ON c.id = i.category_id`;
+  FROM items i
+  LEFT JOIN categories c ON c.id = i.category_id
+  LEFT JOIN projects p ON p.id = i.project_id`;
+
+function nextDate(value: unknown, recurrence: Recurrence) {
+  if (!value || recurrence === 'none') return null;
+  const date = new Date(`${String(value)}T00:00:00Z`);
+  if (recurrence === 'daily') date.setUTCDate(date.getUTCDate() + 1);
+  if (recurrence === 'weekly') date.setUTCDate(date.getUTCDate() + 7);
+  if (recurrence === 'monthly') date.setUTCMonth(date.getUTCMonth() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
+async function getItem(db: D1Database, id: number) {
+  return db.prepare(`${itemSelect} WHERE i.id = ?`).bind(id).first();
+}
 
 api.get('/items', async (c) => {
-  const result = await c.env.mymanager_db.prepare(`${itemSelect} ORDER BY i.status ASC, i.due_date IS NULL, i.due_date ASC, i.created_at DESC`).all();
+  const result = await c.env.mymanager_db.prepare(
+    `${itemSelect} ORDER BY i.status ASC, i.sort_order ASC, i.due_date IS NULL, i.due_date ASC, i.created_at DESC`,
+  ).all();
   return c.json(result.results);
 });
 
@@ -23,42 +43,60 @@ api.post('/items', async (c) => {
     return c.json({ error: '入力内容を確認してください。' }, 400);
   }
   const result = await c.env.mymanager_db.prepare(
-    `INSERT INTO items (title, note, kind, priority, due_date, category_id)
-     VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
-  ).bind(title, body.note?.trim() ?? '', body.kind, body.priority ?? 'medium', body.dueDate || null, body.categoryId || null).first<{ id: number }>();
-  const item = await c.env.mymanager_db.prepare(`${itemSelect} WHERE i.id = ?`).bind(result?.id).first();
-  return c.json(item, 201);
+    `INSERT INTO items (title, note, kind, priority, due_date, category_id, project_id, recurrence, reminder_at, sort_order)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+  ).bind(
+    title, body.note?.trim() ?? '', body.kind, body.priority ?? 'medium', body.dueDate || null,
+    body.categoryId || null, body.projectId || null, body.recurrence ?? 'none', body.reminderAt || null,
+    body.sortOrder ?? 0,
+  ).first<{ id: number }>();
+  return c.json(await getItem(c.env.mymanager_db, result!.id), 201);
 });
 
 api.patch('/items/:id', async (c) => {
   const id = Number(c.req.param('id'));
   const body = await c.req.json<Partial<ItemInput> & { status?: ItemStatus }>();
   if (!Number.isInteger(id)) return c.json({ error: '不正なIDです。' }, 400);
-
-  const current = await c.env.mymanager_db.prepare('SELECT * FROM items WHERE id = ?').bind(id).first<Record<string, unknown>>();
+  const db = c.env.mymanager_db;
+  const current = await db.prepare('SELECT * FROM items WHERE id = ?').bind(id).first<ItemRow>();
   if (!current) return c.json({ error: '項目が見つかりません。' }, 404);
 
   const status = body.status ?? current.status;
-  const title = body.title === undefined ? current.title : body.title.trim();
+  const title = body.title === undefined ? String(current.title) : body.title.trim();
   if (!title) return c.json({ error: 'タイトルは必須です。' }, 400);
+  const recurrence = (body.recurrence ?? current.recurrence) as Recurrence;
 
-  await c.env.mymanager_db.prepare(
+  await db.prepare(
     `UPDATE items SET title = ?, note = ?, kind = ?, status = ?, priority = ?, due_date = ?, category_id = ?,
+      project_id = ?, recurrence = ?, reminder_at = ?, sort_order = ?, updated_at = datetime('now'),
       completed_at = CASE WHEN ? = 'done' THEN COALESCE(completed_at, datetime('now')) ELSE NULL END
      WHERE id = ?`,
   ).bind(
-    title,
-    body.note ?? current.note,
-    body.kind ?? current.kind,
-    status,
-    body.priority ?? current.priority,
+    title, body.note ?? current.note, body.kind ?? current.kind, status, body.priority ?? current.priority,
     body.dueDate === undefined ? current.due_date : body.dueDate || null,
     body.categoryId === undefined ? current.category_id : body.categoryId || null,
-    status,
-    id,
+    body.projectId === undefined ? current.project_id : body.projectId || null,
+    recurrence,
+    body.reminderAt === undefined ? current.reminder_at : body.reminderAt || null,
+    body.sortOrder ?? current.sort_order,
+    status, id,
   ).run();
-  const item = await c.env.mymanager_db.prepare(`${itemSelect} WHERE i.id = ?`).bind(id).first();
-  return c.json(item);
+
+  let nextItem = null;
+  if (status === 'done' && current.status === 'open' && recurrence !== 'none') {
+    const dueDate = nextDate(body.dueDate === undefined ? current.due_date : body.dueDate, recurrence);
+    const inserted = await db.prepare(
+      `INSERT INTO items (title, note, kind, priority, due_date, category_id, project_id, recurrence, reminder_at, sort_order)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?) RETURNING id`,
+    ).bind(
+      title, body.note ?? current.note, body.kind ?? current.kind, body.priority ?? current.priority, dueDate,
+      body.categoryId === undefined ? current.category_id : body.categoryId || null,
+      body.projectId === undefined ? current.project_id : body.projectId || null,
+      recurrence, body.sortOrder ?? current.sort_order,
+    ).first<{ id: number }>();
+    nextItem = await getItem(db, inserted!.id);
+  }
+  return c.json({ item: await getItem(db, id), nextItem });
 });
 
 api.delete('/items/:id', async (c) => {
@@ -66,6 +104,12 @@ api.delete('/items/:id', async (c) => {
   if (!Number.isInteger(id)) return c.json({ error: '不正なIDです。' }, 400);
   await c.env.mymanager_db.prepare('DELETE FROM items WHERE id = ?').bind(id).run();
   return c.body(null, 204);
+});
+
+api.delete('/items', async (c) => {
+  if (c.req.query('status') !== 'done') return c.json({ error: '削除対象を指定してください。' }, 400);
+  const result = await c.env.mymanager_db.prepare("DELETE FROM items WHERE status = 'done'").run();
+  return c.json({ deleted: result.meta.changes });
 });
 
 api.get('/categories', async (c) => {
@@ -84,6 +128,35 @@ api.post('/categories', async (c) => {
   } catch {
     return c.json({ error: '同じ名前のカテゴリがあります。' }, 409);
   }
+});
+
+api.get('/projects', async (c) => {
+  const result = await c.env.mymanager_db.prepare('SELECT id, name, color, archived FROM projects WHERE archived = 0 ORDER BY name').all();
+  return c.json(result.results);
+});
+
+api.post('/projects', async (c) => {
+  const body = await c.req.json<{ name?: string; color?: string }>();
+  const name = body.name?.trim();
+  const color = /^#[0-9a-f]{6}$/i.test(body.color ?? '') ? body.color! : '#6f7c64';
+  if (!name || name.length > 60) return c.json({ error: 'プロジェクト名を入力してください。' }, 400);
+  try {
+    const result = await c.env.mymanager_db.prepare('INSERT INTO projects (name, color) VALUES (?, ?) RETURNING id, name, color, archived').bind(name, color).first();
+    return c.json(result, 201);
+  } catch {
+    return c.json({ error: '同じ名前のプロジェクトがあります。' }, 409);
+  }
+});
+
+api.get('/export', async (c) => {
+  const db = c.env.mymanager_db;
+  const [items, categories, projects] = await Promise.all([
+    db.prepare('SELECT * FROM items ORDER BY id').all(),
+    db.prepare('SELECT * FROM categories ORDER BY id').all(),
+    db.prepare('SELECT * FROM projects ORDER BY id').all(),
+  ]);
+  c.header('Content-Disposition', `attachment; filename="mymanager-${new Date().toISOString().slice(0, 10)}.json"`);
+  return c.json({ version: 1, exportedAt: new Date().toISOString(), items: items.results, categories: categories.results, projects: projects.results });
 });
 
 api.onError((error, c) => {

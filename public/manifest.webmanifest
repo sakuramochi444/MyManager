@@ -1,0 +1,19 @@
+{
+  "name": "MyManager",
+  "short_name": "MyManager",
+  "description": "毎日のタスクと、いつかやりたいことを管理するアプリ",
+  "lang": "ja",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f4ee",
+  "theme_color": "#58634a",
+  "icons": [
+    {
+      "src": "/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
