@@ -41,9 +41,10 @@ import {
   Flame,
   Trophy,
   Undo2,
+  Eye,
   X,
 } from 'lucide-react';
-import type { Category, Item, ItemInput, ItemKind, ItemUpdateResult, Note, NoteColor, NoteInput, Priority, Project, Recurrence, SubtaskInput } from '../shared/types';
+import type { Category, DailyPlan, Item, ItemInput, ItemKind, ItemUpdateResult, Note, NoteColor, NoteInput, Priority, Project, Recurrence, SubtaskInput, TaskProgress } from '../shared/types';
 
 type View = 'dashboard' | 'calendar' | 'today' | 'upcoming' | 'overdue' | 'tasks' | 'wishes' | 'notes' | 'done' | 'trash' | 'settings';
 type Sort = 'smart' | 'due' | 'priority' | 'created';
@@ -52,6 +53,8 @@ type Density = 'comfortable' | 'compact';
 interface Preferences { defaultView: Exclude<View, 'settings' | 'trash'>; accent: Accent; density: Density; dailyGoal: number; foregroundNotifications: boolean }
 interface PushPreferences { dueEnabled: boolean; dailyEnabled: boolean; dailyTime: string; quietStart: string; quietEnd: string; quietEnabled: boolean }
 
+const progressCopy: Record<TaskProgress, string> = { not_started: '未着手', in_progress: '作業中', done: '完了' };
+const progressClass: Record<TaskProgress, string> = { not_started: 'todo', in_progress: 'doing', done: 'done' };
 const defaultPreferences: Preferences = { defaultView: 'today', accent: 'sage', density: 'comfortable', dailyGoal: 3, foregroundNotifications: true };
 const accentColors: Record<Accent, { base: string; dark: string }> = {
   sage: { base: '#58634a', dark: '#414b36' },
@@ -125,6 +128,18 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return response.status === 204 ? (undefined as T) : response.json() as Promise<T>;
 }
 
+function NotePreview({ text }: { text: string }) {
+  if (!text.trim()) return <p className="formatted-note-empty">メモはありません</p>;
+  return <div className="formatted-note">{text.split('\n').map((line, index) => {
+    const trimmed = line.trim();
+    if (!trimmed) return <br key={index} />;
+    if (/^[-*]\s+/.test(trimmed)) return <p key={index} className="note-bullet">{trimmed.replace(/^[-*]\s+/, '')}</p>;
+    if (/^\d+\.\s+/.test(trimmed)) return <p key={index} className="note-numbered"><span>{trimmed.match(/^\d+/)?.[0]}</span>{trimmed.replace(/^\d+\.\s+/, '')}</p>;
+    if (/^#{1,3}\s+/.test(trimmed)) return <h3 key={index}>{trimmed.replace(/^#{1,3}\s+/, '')}</h3>;
+    return <p key={index}>{line}</p>;
+  })}</div>;
+}
+
 export function App() {
   const [preferences, setPreferences] = useState<Preferences>(loadPreferences);
   const [items, setItems] = useState<Item[]>([]);
@@ -132,12 +147,14 @@ export function App() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
+  const [dailyPlan, setDailyPlan] = useState<DailyPlan>({ date: localDate(), content: '', updatedAt: '' });
   const [view, setView] = useState<View>(() => loadPreferences().defaultView);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [composerOpen, setComposerOpen] = useState(false);
   const [composerDate, setComposerDate] = useState<string | null>(null);
   const [editingItem, setEditingItem] = useState<Item | null>(null);
+  const [detailItem, setDetailItem] = useState<Item | null>(null);
   const [quickTitle, setQuickTitle] = useState('');
   const [sort, setSort] = useState<Sort>('smart');
   const [priorityFilter, setPriorityFilter] = useState<Priority | 'all'>('all');
@@ -164,9 +181,13 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    document.body.style.overflow = composerOpen || sidebarOpen ? 'hidden' : '';
+    request<DailyPlan>(`/api/daily-plans/${localDate()}`).then(setDailyPlan).catch((reason: Error) => setError(reason.message));
+  }, []);
+
+  useEffect(() => {
+    document.body.style.overflow = composerOpen || sidebarOpen || Boolean(detailItem) ? 'hidden' : '';
     return () => { document.body.style.overflow = ''; };
-  }, [composerOpen, sidebarOpen]);
+  }, [composerOpen, detailItem, sidebarOpen]);
 
   useEffect(() => {
     localStorage.setItem('mymanager-preferences', JSON.stringify(preferences));
@@ -179,6 +200,12 @@ export function App() {
     if (undoHideTimer.current) window.clearTimeout(undoHideTimer.current);
     if (pendingDelete.current) window.clearTimeout(pendingDelete.current.timer);
   }, []);
+
+  useEffect(() => {
+    if (!detailItem) return;
+    const latest = items.find((item) => item.id === detailItem.id);
+    if (latest && latest !== detailItem) setDetailItem(latest);
+  }, [detailItem, items]);
 
   function showUndo(message: string, action: () => void) {
     if (undoHideTimer.current) window.clearTimeout(undoHideTimer.current);
@@ -346,13 +373,44 @@ export function App() {
 
   function openEdit(item: Item) {
     setEditingItem(item);
+    setDetailItem(null);
     setComposerDate(null);
     setComposerOpen(true);
   }
 
+  function openDetail(item: Item) {
+    setDetailItem(item);
+    setComposerOpen(false);
+    setEditingItem(null);
+  }
+
+  async function saveDailyPlan(content: string) {
+    const previous = dailyPlan;
+    const optimistic = { ...dailyPlan, content };
+    setDailyPlan(optimistic);
+    try {
+      setDailyPlan(await request<DailyPlan>(`/api/daily-plans/${dailyPlan.date}`, { method: 'PUT', body: JSON.stringify({ content }) }));
+    } catch (reason) {
+      setDailyPlan(previous);
+      setError((reason as Error).message);
+    }
+  }
+
+  async function updateItemProgress(item: Item, progress: TaskProgress) {
+    const previous = item;
+    setItems((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, progress, status: progress === 'done' ? 'done' : 'open' } : candidate));
+    try {
+      const result = await request<ItemUpdateResult>(`/api/items/${item.id}`, { method: 'PATCH', body: JSON.stringify({ progress }) });
+      setItems((current) => current.map((candidate) => candidate.id === item.id ? result.item : candidate));
+    } catch (reason) {
+      setItems((current) => current.map((candidate) => candidate.id === item.id ? previous : candidate));
+      setError((reason as Error).message);
+    }
+  }
+
   async function toggleItem(item: Item) {
     const status = item.status === 'done' ? 'open' : 'done';
-    setItems((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status } : candidate));
+    setItems((current) => current.map((candidate) => candidate.id === item.id ? { ...candidate, status, progress: status === 'done' ? 'done' : 'not_started' } : candidate));
     try {
       const result = await request<ItemUpdateResult>(`/api/items/${item.id}`, { method: 'PATCH', body: JSON.stringify({ status }) });
       setItems((current) => {
@@ -533,7 +591,7 @@ export function App() {
             <div className="date-card"><CalendarDays size={18} /><span>{new Intl.DateTimeFormat('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }).format(new Date())}</span></div>
           </div>
 
-          {view === 'dashboard' ? <DashboardPanel items={items} projects={projects} dailyGoal={preferences.dailyGoal} onNavigate={navigate} onEdit={openEdit} /> : view === 'calendar' ? <CalendarPanel items={items} onAddDate={openNew} onEdit={openEdit} /> : view === 'notes' ? <NotesPanel notes={notes} onSave={saveNote} onDelete={deleteNote} /> : view === 'trash' ? <TrashPanel items={trashedItems} onRestore={restoreTrashItem} onDelete={permanentlyDelete} onEmpty={emptyTrash} /> : view === 'settings' ? <SettingsPanel categories={categories} projects={projects} preferences={preferences} completedCount={counts.done} trashCount={counts.trash} onPreferencesChange={setPreferences} onCreateCategory={createCategory} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onCreateProject={async (name, color) => { await createProject(name, color); }} onUpdateProject={updateProject} onDeleteProject={deleteProject} onClearCompleted={clearCompleted} onOpenTrash={() => navigate('trash')} onRestoreBackup={restoreBackup} /> : <>
+          {view === 'dashboard' ? <DashboardPanel items={items} projects={projects} dailyGoal={preferences.dailyGoal} dailyPlan={dailyPlan} onSaveDailyPlan={saveDailyPlan} onNavigate={navigate} onOpen={openDetail} /> : view === 'calendar' ? <CalendarPanel items={items} onAddDate={openNew} onOpen={openDetail} /> : view === 'notes' ? <NotesPanel notes={notes} onSave={saveNote} onDelete={deleteNote} /> : view === 'trash' ? <TrashPanel items={trashedItems} onRestore={restoreTrashItem} onDelete={permanentlyDelete} onEmpty={emptyTrash} /> : view === 'settings' ? <SettingsPanel categories={categories} projects={projects} preferences={preferences} completedCount={counts.done} trashCount={counts.trash} onPreferencesChange={setPreferences} onCreateCategory={createCategory} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onCreateProject={async (name, color) => { await createProject(name, color); }} onUpdateProject={updateProject} onDeleteProject={deleteProject} onClearCompleted={clearCompleted} onOpenTrash={() => navigate('trash')} onRestoreBackup={restoreBackup} /> : <>
           <div className="summary-strip" aria-label="進捗サマリー">
             <button onClick={() => navigate('today')}><span>今日</span><strong>{counts.today}</strong></button>
             <button onClick={() => navigate('upcoming')}><span>今後7日</span><strong>{counts.upcoming}</strong></button>
@@ -541,13 +599,14 @@ export function App() {
             <button onClick={() => navigate('done')}><span>完了</span><strong>{counts.done}</strong></button>
           </div>
 
+          {view === 'today' && <DailyPlanCard plan={dailyPlan} onSave={saveDailyPlan} compact />}
           <div className="list-card">
             {view !== 'done' && view !== 'overdue' && <form className="quick-add" onSubmit={quickAdd}><Plus size={17} /><input value={quickTitle} onChange={(event) => setQuickTitle(event.target.value)} placeholder={view === 'wishes' ? 'やりたいことをすぐ追加…' : 'タスクをすぐ追加…'} aria-label="クイック追加" /><button disabled={!quickTitle.trim()}>追加</button></form>}
             <div className="filter-bar"><SlidersHorizontal size={15} /><select value={sort} onChange={(event) => setSort(event.target.value as Sort)} aria-label="並び順"><option value="smart">おすすめ順</option><option value="due">期限順</option><option value="priority">優先度順</option><option value="created">新しい順</option></select><select value={priorityFilter} onChange={(event) => setPriorityFilter(event.target.value as Priority | 'all')} aria-label="優先度で絞り込み"><option value="all">すべての優先度</option><option value="high">高</option><option value="medium">中</option><option value="low">低</option></select><select value={projectFilter} onChange={(event) => setProjectFilter(event.target.value === 'all' ? 'all' : Number(event.target.value))} aria-label="プロジェクトで絞り込み"><option value="all">すべてのプロジェクト</option>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select></div>
             <div className="list-header"><span>{visibleItems.length}件</span>{view === 'done' ? <button className="clear-done" onClick={clearCompleted}><Trash2 size={14} />すべて削除</button> : <span className="sort-label"><span>整理済み</span><ChevronDown size={15} /></span>}</div>
             {loading ? <LoadingRows /> : visibleItems.length ? (
               <div className="item-list">
-                {visibleItems.map((item) => <ItemRow key={item.id} item={item} onToggle={toggleItem} onUpdateSubtasks={updateSubtasks} onRemove={removeItem} onEdit={openEdit} onDragStart={() => { draggedItemId.current = item.id; }} onDrop={() => void reorderItems(item.id)} />)}
+                {visibleItems.map((item) => <ItemRow key={item.id} item={item} onToggle={toggleItem} onUpdateSubtasks={updateSubtasks} onUpdateProgress={updateItemProgress} onRemove={removeItem} onOpen={openDetail} onEdit={openDetail} onDragStart={() => { draggedItemId.current = item.id; }} onDrop={() => void reorderItems(item.id)} />)}
               </div>
             ) : <EmptyState view={view} hasQuery={Boolean(query)} onAdd={openNew} />}
           </div>
@@ -565,6 +624,7 @@ export function App() {
       </nav>
 
       {!['settings', 'trash', 'notes'].includes(view) && <button className="mobile-fab" onClick={() => openNew()} aria-label="新しい項目を追加"><Plus size={24} /></button>}
+      {detailItem && <TaskDetailModal item={detailItem} onClose={() => setDetailItem(null)} onEdit={openEdit} onToggle={toggleItem} onUpdateProgress={updateItemProgress} />}
       {composerOpen && <Composer categories={categories} projects={projects} initialItem={editingItem} defaultKind={view === 'wishes' ? 'wish' : 'task'} defaultDate={composerDate ?? (view === 'today' ? localDate() : null)} onClose={() => { setComposerOpen(false); setEditingItem(null); setComposerDate(null); }} onSubmit={editingItem ? updateItem : createItem} onCreateProject={createProject} />}
       {undoNotice && <div className="undo-toast" role="status"><span>{undoNotice.message}</span><button onClick={performUndo}><Undo2 size={15} />元に戻す</button></div>}
       {celebrating && <div className="celebration" aria-live="polite"><Trophy size={34} /><strong>今日の目標達成！</strong><span>{Array.from({ length: 18 }, (_, index) => <i key={index} />)}</span></div>}
@@ -573,7 +633,39 @@ export function App() {
   );
 }
 
-function CalendarPanel({ items, onAddDate, onEdit }: { items: Item[]; onAddDate: (date: string) => void; onEdit: (item: Item) => void }) {
+function TaskDetailModal({ item, onClose, onEdit, onToggle, onUpdateProgress }: { item: Item; onClose: () => void; onEdit: (item: Item) => void; onToggle: (item: Item) => void; onUpdateProgress: (item: Item, progress: TaskProgress) => Promise<void> }) {
+  const dateLabel = item.dueDate ? new Intl.DateTimeFormat('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }).format(new Date(`${item.dueDate}T00:00:00`)) : '期限なし';
+  const timeLabel = item.kind === 'task' && item.dueDate ? item.allDay ? '終日' : [item.startTime, item.endTime].filter(Boolean).join(' - ') || '時刻未設定' : null;
+  const completedSubtasks = item.subtasks.filter((subtask) => subtask.completed).length;
+
+  useEffect(() => {
+    const listener = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', listener);
+    return () => window.removeEventListener('keydown', listener);
+  }, [onClose]);
+
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+    <section className="task-detail-modal" role="dialog" aria-modal="true" aria-labelledby="task-detail-title">
+      <div className="composer-header"><div><p className="eyebrow">{item.kind === 'wish' ? 'WISH DETAIL' : 'TASK DETAIL'}</p><h2 id="task-detail-title">{item.title}</h2></div><button type="button" className="icon-button" onClick={onClose}><X size={20} /></button></div>
+      <div className="detail-actions">
+        {item.kind === 'task' && <select className={`progress-select progress-${progressClass[item.progress]}`} value={item.progress} onChange={(event) => void onUpdateProgress(item, event.target.value as TaskProgress)} aria-label="進捗">{(Object.keys(progressCopy) as TaskProgress[]).map((value) => <option key={value} value={value}>{progressCopy[value]}</option>)}</select>}
+        <button type="button" className="secondary-button" onClick={() => onToggle(item)}>{item.status === 'done' ? '未完了に戻す' : '完了にする'}</button>
+        <button type="button" className="primary-button" onClick={() => onEdit(item)}><Edit3 size={15} />編集</button>
+      </div>
+      <div className="detail-meta-grid">
+        <span><CalendarDays size={15} /><strong>{dateLabel}</strong></span>
+        {timeLabel && <span><Clock3 size={15} /><strong>{timeLabel}</strong></span>}
+        {item.projectName && <span><Folder size={15} /><strong>{item.projectName}</strong></span>}
+        {item.categoryName && <span><Tags size={15} /><strong>{item.categoryName}</strong></span>}
+        <span><Target size={15} /><strong>{item.priority === 'high' ? '優先度：高' : item.priority === 'medium' ? '優先度：中' : '優先度：低'}</strong></span>
+      </div>
+      <section className="detail-section"><h3>メモ</h3><NotePreview text={item.note} /></section>
+      {item.subtasks.length > 0 && <section className="detail-section"><h3>サブタスク <small>{completedSubtasks}/{item.subtasks.length}</small></h3><div className="detail-subtasks">{item.subtasks.map((subtask) => <div key={subtask.id} className={subtask.completed ? 'done' : ''}><i>{Boolean(subtask.completed) && <Check size={11} />}</i><span>{subtask.title}</span>{subtask.dueDate && <small>{new Intl.DateTimeFormat('ja-JP', { month: 'numeric', day: 'numeric' }).format(new Date(`${subtask.dueDate}T00:00:00`))}</small>}</div>)}</div></section>}
+    </section>
+  </div>;
+}
+
+function CalendarPanel({ items, onAddDate, onOpen }: { items: Item[]; onAddDate: (date: string) => void; onOpen: (item: Item) => void }) {
   const [month, setMonth] = useState(() => { const date = new Date(); date.setDate(1); return date; });
   const [selectedDate, setSelectedDate] = useState(localDate());
   const year = month.getFullYear();
@@ -597,16 +689,16 @@ function CalendarPanel({ items, onAddDate, onEdit }: { items: Item[]; onAddDate:
     <section className="calendar-card">
       <div className="calendar-toolbar"><button onClick={() => changeMonth(-1)} aria-label="前の月"><ChevronLeft size={18} /></button><div><strong>{year}年 {monthIndex + 1}月</strong><button onClick={() => { const now = new Date(); now.setDate(1); setMonth(now); setSelectedDate(localDate()); }}>今日へ戻る</button></div><button onClick={() => changeMonth(1)} aria-label="次の月"><ChevronRight size={18} /></button></div>
       <div className="calendar-weekdays">{['月', '火', '水', '木', '金', '土', '日'].map((day) => <span key={day}>{day}</span>)}</div>
-      <div className="calendar-grid">{days.map((day) => <div key={day.key} className={`calendar-day ${day.date.getMonth() !== monthIndex ? 'outside' : ''} ${day.key === selectedDate ? 'selected' : ''} ${day.key === localDate() ? 'today' : ''}`}><button className="calendar-day-number" onClick={() => setSelectedDate(day.key)}>{day.date.getDate()}</button><div className="calendar-day-items">{day.items.slice(0, 3).map((item) => <button key={item.id} className={item.status === 'done' ? 'done' : ''} onClick={() => onEdit(item)}><i style={{ background: item.projectColor ?? item.categoryColor ?? '#657153' }} /><span>{item.title}</span></button>)}{day.items.length > 3 && <small>ほか{day.items.length - 3}件</small>}</div><span className="calendar-mobile-count">{day.items.length > 0 && day.items.length}</span></div>)}</div>
+      <div className="calendar-grid">{days.map((day) => <div key={day.key} className={`calendar-day ${day.date.getMonth() !== monthIndex ? 'outside' : ''} ${day.key === selectedDate ? 'selected' : ''} ${day.key === localDate() ? 'today' : ''}`}><button className="calendar-day-number" onClick={() => setSelectedDate(day.key)}>{day.date.getDate()}</button><div className="calendar-day-items">{day.items.slice(0, 3).map((item) => <button key={item.id} className={item.status === 'done' ? 'done' : ''} onClick={() => onOpen(item)}><i style={{ background: item.projectColor ?? item.categoryColor ?? '#657153' }} /><span>{item.title}</span></button>)}{day.items.length > 3 && <small>ほか{day.items.length - 3}件</small>}</div><span className="calendar-mobile-count">{day.items.length > 0 && day.items.length}</span></div>)}</div>
     </section>
     <aside className="calendar-agenda">
       <div className="calendar-agenda-header"><div><p className="eyebrow">SELECTED DAY</p><h2>{new Intl.DateTimeFormat('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }).format(new Date(`${selectedDate}T00:00:00`))}</h2></div><button onClick={() => onAddDate(selectedDate)}><Plus size={16} />追加</button></div>
-      <div className="calendar-agenda-list">{selectedItems.length ? selectedItems.map((item) => <button key={item.id} onClick={() => onEdit(item)}><i className={item.status === 'done' ? 'done' : ''}>{item.status === 'done' && <Check size={11} />}</i><span><strong>{item.title}</strong><small>{item.projectName ?? item.categoryName ?? (item.priority === 'high' ? '優先度：高' : 'タスク')}</small></span><ChevronRight size={14} /></button>) : <DashboardEmpty icon={<CalendarDays size={19} />} text="この日のタスクはありません" />}</div>
+      <div className="calendar-agenda-list">{selectedItems.length ? selectedItems.map((item) => <button key={item.id} onClick={() => onOpen(item)}><i className={item.status === 'done' ? 'done' : ''}>{item.status === 'done' && <Check size={11} />}</i><span><strong>{item.title}</strong><small>{item.projectName ?? item.categoryName ?? (item.priority === 'high' ? '優先度：高' : 'タスク')}</small></span><ChevronRight size={14} /></button>) : <DashboardEmpty icon={<CalendarDays size={19} />} text="この日のタスクはありません" />}</div>
     </aside>
   </div>;
 }
 
-function DashboardPanel({ items, projects, dailyGoal, onNavigate, onEdit }: { items: Item[]; projects: Project[]; dailyGoal: number; onNavigate: (view: View) => void; onEdit: (item: Item) => void }) {
+function DashboardPanel({ items, projects, dailyGoal, dailyPlan, onSaveDailyPlan, onNavigate, onOpen }: { items: Item[]; projects: Project[]; dailyGoal: number; dailyPlan: DailyPlan; onSaveDailyPlan: (content: string) => Promise<void>; onNavigate: (view: View) => void; onOpen: (item: Item) => void }) {
   const today = localDate();
   const openTasks = items.filter((item) => item.kind === 'task' && item.status === 'open');
   const completedItems = items.filter((item) => item.status === 'done');
@@ -650,6 +742,8 @@ function DashboardPanel({ items, projects, dailyGoal, onNavigate, onEdit }: { it
       {completedToday >= dailyGoal && <Trophy className="goal-trophy" size={25} />}
     </section>
 
+    <DailyPlanCard plan={dailyPlan} onSave={onSaveDailyPlan} />
+
     <div className="dashboard-layout">
       <section className="dashboard-card dashboard-card--activity">
         <div className="dashboard-card-header"><div><p className="eyebrow">ACTIVITY</p><h2>直近7日の完了</h2></div><span className="activity-total"><strong>{completedThisWeek.length}</strong>件完了</span></div>
@@ -658,7 +752,7 @@ function DashboardPanel({ items, projects, dailyGoal, onNavigate, onEdit }: { it
 
       <section className="dashboard-card">
         <div className="dashboard-card-header"><div><p className="eyebrow">UPCOMING</p><h2>次の予定</h2></div><button onClick={() => onNavigate('upcoming')}>すべて見る<ArrowRight size={13} /></button></div>
-        <div className="dashboard-list">{upcoming.length ? upcoming.map((item) => <button key={item.id} onClick={() => onEdit(item)}><span className="dashboard-date"><strong>{new Date(`${item.dueDate}T00:00:00`).getDate()}</strong><small>{new Intl.DateTimeFormat('ja-JP', { month: 'short' }).format(new Date(`${item.dueDate}T00:00:00`))}</small></span><span className="dashboard-list-body"><strong>{item.title}</strong><small>{item.projectName ?? item.categoryName ?? 'タスク'}</small></span><ArrowRight size={14} /></button>) : <DashboardEmpty icon={<CalendarDays size={19} />} text="予定されているタスクはありません" />}</div>
+        <div className="dashboard-list">{upcoming.length ? upcoming.map((item) => <button key={item.id} onClick={() => onOpen(item)}><span className="dashboard-date"><strong>{new Date(`${item.dueDate}T00:00:00`).getDate()}</strong><small>{new Intl.DateTimeFormat('ja-JP', { month: 'short' }).format(new Date(`${item.dueDate}T00:00:00`))}</small></span><span className="dashboard-list-body"><strong>{item.title}</strong><small>{item.projectName ?? item.categoryName ?? 'タスク'}</small></span><ArrowRight size={14} /></button>) : <DashboardEmpty icon={<CalendarDays size={19} />} text="予定されているタスクはありません" />}</div>
       </section>
 
       <section className="dashboard-card">
@@ -668,10 +762,29 @@ function DashboardPanel({ items, projects, dailyGoal, onNavigate, onEdit }: { it
 
       <section className="dashboard-card">
         <div className="dashboard-card-header"><div><p className="eyebrow">SOMEDAY</p><h2>やりたいこと</h2></div><button onClick={() => onNavigate('wishes')}>すべて見る<ArrowRight size={13} /></button></div>
-        <div className="wish-preview">{wishes.length ? wishes.map((item) => <button key={item.id} onClick={() => onEdit(item)}><Sparkles size={14} /><span>{item.title}</span><ArrowRight size={13} /></button>) : <DashboardEmpty icon={<Sparkles size={19} />} text="やりたいことを追加してみましょう" />}</div>
+        <div className="wish-preview">{wishes.length ? wishes.map((item) => <button key={item.id} onClick={() => onOpen(item)}><Sparkles size={14} /><span>{item.title}</span><ArrowRight size={13} /></button>) : <DashboardEmpty icon={<Sparkles size={19} />} text="やりたいことを追加してみましょう" />}</div>
       </section>
     </div>
   </div>;
+}
+
+function DailyPlanCard({ plan, onSave, compact = false }: { plan: DailyPlan; onSave: (content: string) => Promise<void>; compact?: boolean }) {
+  const [content, setContent] = useState(plan.content);
+  const [saving, setSaving] = useState(false);
+  const changed = content !== plan.content;
+
+  useEffect(() => setContent(plan.content), [plan.content]);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    try { await onSave(content); } finally { setSaving(false); }
+  }
+
+  return <form className={`daily-plan-card ${compact ? 'daily-plan-card--compact' : ''}`} onSubmit={submit}>
+    <div className="daily-plan-heading"><div><p className="eyebrow">TODAY PLAN</p><h2>今日やること</h2></div><button disabled={!changed || saving}><Save size={14} />{saving ? '保存中' : '保存'}</button></div>
+    <textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="- 今日やることをざっくり書く&#10;- タスクにする前のメモもOK" rows={compact ? 4 : 5} maxLength={5000} />
+  </form>;
 }
 
 function DashboardEmpty({ icon, text }: { icon: React.ReactNode; text: string }) {
@@ -883,7 +996,7 @@ function ResourceRow({ name: initialName, color: initialColor, onSave, onDelete,
   return <div className="resource-row"><input type="color" value={color} onChange={(event) => setColor(event.target.value)} aria-label="色" /><input value={name} onChange={(event) => setName(event.target.value)} maxLength={60} /><div className="resource-row-actions"><button disabled={!changed || saving} onClick={save} title="保存"><Save size={15} /></button>{onArchive && <button onClick={onArchive} title="アーカイブ"><Archive size={15} /></button>}<button className="danger" onClick={onDelete} title="削除"><Trash2 size={15} /></button></div></div>;
 }
 
-function ItemRow({ item, onToggle, onUpdateSubtasks, onRemove, onEdit, onDragStart, onDrop }: { item: Item; onToggle: (item: Item) => void; onUpdateSubtasks: (item: Item, subtasks: SubtaskInput[]) => Promise<void>; onRemove: (item: Item) => void; onEdit: (item: Item) => void; onDragStart: () => void; onDrop: () => void }) {
+function ItemRow({ item, onToggle, onUpdateSubtasks, onUpdateProgress, onRemove, onOpen, onEdit, onDragStart, onDrop }: { item: Item; onToggle: (item: Item) => void; onUpdateSubtasks: (item: Item, subtasks: SubtaskInput[]) => Promise<void>; onUpdateProgress: (item: Item, progress: TaskProgress) => Promise<void>; onRemove: (item: Item) => void; onOpen: (item: Item) => void; onEdit: (item: Item) => void; onDragStart: () => void; onDrop: () => void }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [subtasksOpen, setSubtasksOpen] = useState(false);
   const [newSubtask, setNewSubtask] = useState('');
@@ -918,6 +1031,10 @@ function Composer({ categories, projects, initialItem, defaultKind, defaultDate,
   const [note, setNote] = useState(initialItem?.note ?? '');
   const [kind, setKind] = useState<ItemKind>(initialItem?.kind ?? defaultKind);
   const [dueDate, setDueDate] = useState(initialItem?.dueDate ?? defaultDate ?? '');
+  const [progress, setProgress] = useState<TaskProgress>(initialItem?.progress ?? 'not_started');
+  const [allDay, setAllDay] = useState(initialItem ? Boolean(initialItem.allDay) : true);
+  const [startTime, setStartTime] = useState(initialItem?.startTime ?? '');
+  const [endTime, setEndTime] = useState(initialItem?.endTime ?? '');
   const [priority, setPriority] = useState<Priority>(initialItem?.priority ?? 'medium');
   const [categoryId, setCategoryId] = useState(initialItem?.categoryId ? String(initialItem.categoryId) : '');
   const [projectId, setProjectId] = useState(initialItem?.projectId ? String(initialItem.projectId) : '');
@@ -939,7 +1056,7 @@ function Composer({ categories, projects, initialItem, defaultKind, defaultDate,
     event.preventDefault();
     if (!title.trim()) return;
     setSaving(true);
-    await onSubmit({ title, note, kind, dueDate: kind === 'task' ? dueDate || null : null, priority, categoryId: categoryId ? Number(categoryId) : null, projectId: projectId ? Number(projectId) : null, recurrence: kind === 'task' ? recurrence : 'none', reminderAt: kind === 'task' ? reminderAt || null : null, subtasks: kind === 'task' ? subtasks.filter((subtask) => subtask.title.trim()) : [] });
+    await onSubmit({ title, note, kind, progress: kind === 'task' ? progress : 'not_started', dueDate: kind === 'task' ? dueDate || null : null, allDay, startTime: allDay ? null : startTime || null, endTime: allDay ? null : endTime || null, priority, categoryId: categoryId ? Number(categoryId) : null, projectId: projectId ? Number(projectId) : null, recurrence: kind === 'task' ? recurrence : 'none', reminderAt: kind === 'task' ? reminderAt || null : null, subtasks: kind === 'task' ? subtasks.filter((subtask) => subtask.title.trim()) : [] });
     setSaving(false);
   }
 
@@ -953,6 +1070,13 @@ function Composer({ categories, projects, initialItem, defaultKind, defaultDate,
     } catch (reason) { window.alert((reason as Error).message); }
   }
 
+  function addNoteLayout(prefix: string) {
+    setNote((current) => {
+      const suffix = current && !current.endsWith('\n') ? '\n' : '';
+      return `${current}${suffix}${prefix}`;
+    });
+  }
+
   return (
     <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <form className="composer" onSubmit={submit}>
@@ -960,14 +1084,24 @@ function Composer({ categories, projects, initialItem, defaultKind, defaultDate,
         <div className="kind-switch"><button type="button" className={kind === 'task' ? 'active' : ''} onClick={() => setKind('task')}><CheckCircle2 size={17} />タスク</button><button type="button" className={kind === 'wish' ? 'active' : ''} onClick={() => setKind('wish')}><Sparkles size={17} />やりたいこと</button></div>
         <label className="field"><span>タイトル</span><input autoFocus={!window.matchMedia('(pointer: coarse)').matches} maxLength={200} value={title} onChange={(event) => setTitle(event.target.value)} placeholder={kind === 'task' ? '何をしますか？' : 'いつか叶えたいことは？'} /></label>
         <label className="field"><span>メモ <small>任意</small></span><textarea rows={3} value={note} onChange={(event) => setNote(event.target.value)} placeholder="詳細やアイデアを書き留める" /></label>
+        <div className="note-tools" aria-label="メモのレイアウト">
+          <button type="button" onClick={() => addNoteLayout('# 見出し')}>見出し</button>
+          <button type="button" onClick={() => addNoteLayout('- 箇条書き')}>箇条書き</button>
+          <button type="button" onClick={() => addNoteLayout('1. 番号リスト')}>番号</button>
+        </div>
         {kind === 'task' && <div className="subtask-editor"><div className="subtask-editor-heading"><span><ListChecks size={15} />サブタスク</span><small>ドラッグで並べ替え · {subtasks.filter((subtask) => subtask.completed).length}/{subtasks.length}</small></div><div className="subtask-editor-list">{subtasks.map((subtask, index) => <div key={index} draggable onDragStart={() => { draggedComposerSubtask.current = index; }} onDragOver={(event) => event.preventDefault()} onDrop={() => { const source = draggedComposerSubtask.current; if (source === null || source === index) return; setSubtasks((current) => { const next = [...current]; const [moved] = next.splice(source, 1); next.splice(index, 0, moved); return next; }); draggedComposerSubtask.current = null; }}><GripVertical className="composer-drag" size={14} /><button type="button" className={subtask.completed ? 'checked' : ''} onClick={() => setSubtasks((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, completed: !item.completed } : item))}>{subtask.completed && <Check size={13} />}</button><input value={subtask.title} onChange={(event) => setSubtasks((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, title: event.target.value } : item))} placeholder="小さな作業を入力" /><input className="subtask-date" type="date" value={subtask.dueDate ?? ''} onChange={(event) => setSubtasks((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, dueDate: event.target.value || null } : item))} aria-label="サブタスクの期限" /><button type="button" className="remove-subtask" onClick={() => setSubtasks((current) => current.filter((_, itemIndex) => itemIndex !== index))}><X size={14} /></button></div>)}</div><button type="button" className="add-subtask" onClick={() => setSubtasks((current) => [...current, { title: '', completed: false, dueDate: null }])}><Plus size={14} />サブタスクを追加</button></div>}
         <div className="field-grid composer-options">
           {kind === 'task' && <div className="field date-field"><label htmlFor="due-date">期限</label><input id="due-date" type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} /><span className="date-shortcuts"><button type="button" className={dueDate === localDate() ? 'active' : ''} onClick={() => setDueDate(localDate())}>今日</button><button type="button" className={dueDate === dateAfter(1) ? 'active' : ''} onClick={() => setDueDate(dateAfter(1))}>明日</button><button type="button" className={!dueDate ? 'active' : ''} onClick={() => setDueDate('')}>期限なし</button></span></div>}
+          {kind === 'task' && <label className="field"><span>進捗</span><select value={progress} onChange={(event) => setProgress(event.target.value as TaskProgress)}>{(Object.keys(progressCopy) as TaskProgress[]).map((value) => <option key={value} value={value}>{progressCopy[value]}</option>)}</select></label>}
           <label className="field"><span>カテゴリ</span><select value={categoryId} onChange={(event) => setCategoryId(event.target.value)}><option value="">なし</option>{categories.map((category) => <option value={category.id} key={category.id}>{category.name}</option>)}</select></label>
           <label className="field"><span>優先度</span><select value={priority} onChange={(event) => setPriority(event.target.value as Priority)}><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
           <label className="field"><span>プロジェクト</span><select value={projectId} onChange={(event) => setProjectId(event.target.value)}><option value="">なし</option>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select><button type="button" className="inline-link" onClick={() => setAddingProject((value) => !value)}>＋ 新しいプロジェクト</button></label>
           {kind === 'task' && <label className="field"><span>繰り返し</span><select value={recurrence} onChange={(event) => setRecurrence(event.target.value as Recurrence)}><option value="none">なし</option><option value="daily">毎日</option><option value="weekly">毎週</option><option value="monthly">毎月</option></select></label>}
         </div>
+        {kind === 'task' && <div className="time-editor">
+          <label className="time-all-day"><input type="checkbox" checked={allDay} onChange={(event) => setAllDay(event.target.checked)} />終日</label>
+          {!allDay && <div className="time-range"><label>開始<input type="time" value={startTime} onChange={(event) => setStartTime(event.target.value)} /></label><label>終了<input type="time" value={endTime} onChange={(event) => setEndTime(event.target.value)} /></label></div>}
+        </div>}
         {addingProject && <div className="inline-create"><input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="プロジェクト名" autoFocus /><button type="button" onClick={addProject}>作成</button></div>}
         {kind === 'task' && <label className="field"><span>通知日時 <small>任意・アプリを開いている間</small></span><input type="datetime-local" value={reminderAt} onChange={(event) => setReminderAt(event.target.value)} /></label>}
         <div className="composer-actions"><button type="button" className="secondary-button" onClick={onClose}>キャンセル</button><button className="primary-button" disabled={!title.trim() || saving}>{saving ? '保存中...' : initialItem ? '変更を保存' : '追加する'}</button></div>

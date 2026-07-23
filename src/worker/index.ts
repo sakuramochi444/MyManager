@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import type { ItemInput, ItemStatus, NoteInput, Recurrence, SubtaskInput } from '../shared/types';
+import type { ItemInput, ItemStatus, NoteInput, Recurrence, SubtaskInput, TaskProgress } from '../shared/types';
 
 type Bindings = { mymanager_db: D1Database; VAPID_PRIVATE_JWK?: string; VAPID_SUBJECT?: string };
 type ItemRow = Record<string, unknown>;
@@ -36,8 +36,8 @@ async function sendPush(endpoint: string, env: Bindings) {
 }
 
 const itemSelect = `
-  SELECT i.id, i.title, i.note, i.kind, i.status, i.priority,
-    i.due_date AS dueDate, i.category_id AS categoryId,
+  SELECT i.id, i.title, i.note, i.kind, i.status, i.progress, i.priority,
+    i.due_date AS dueDate, i.all_day AS allDay, i.start_time AS startTime, i.end_time AS endTime, i.category_id AS categoryId,
     c.name AS categoryName, c.color AS categoryColor,
     i.project_id AS projectId, p.name AS projectName, p.color AS projectColor,
     i.recurrence, i.reminder_at AS reminderAt, i.sort_order AS sortOrder,
@@ -96,12 +96,18 @@ api.post('/items', async (c) => {
   if (!title || title.length > 200 || !['task', 'wish'].includes(body.kind)) {
     return c.json({ error: '入力内容を確認してください。' }, 400);
   }
+  const progress = ['not_started', 'in_progress', 'done'].includes(body.progress ?? '') ? body.progress! : 'not_started';
+  const status = progress === 'done' ? 'done' : 'open';
+  const allDay = body.allDay ?? true;
+  const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
+  const startTime = !allDay && timePattern.test(body.startTime ?? '') ? body.startTime! : null;
+  const endTime = !allDay && timePattern.test(body.endTime ?? '') ? body.endTime! : null;
   const result = await c.env.mymanager_db.prepare(
-    `INSERT INTO items (title, note, kind, priority, due_date, category_id, project_id, recurrence, reminder_at, sort_order, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) RETURNING id`,
+    `INSERT INTO items (title, note, kind, status, progress, priority, due_date, all_day, start_time, end_time, category_id, project_id, recurrence, reminder_at, sort_order, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')) RETURNING id`,
   ).bind(
-    title, body.note?.trim() ?? '', body.kind, body.priority ?? 'medium', body.dueDate || null,
-    body.categoryId || null, body.projectId || null, body.recurrence ?? 'none', body.reminderAt || null,
+    title, body.note?.trim() ?? '', body.kind, status, progress, body.priority ?? 'medium', body.dueDate || null,
+    allDay ? 1 : 0, startTime, endTime, body.categoryId || null, body.projectId || null, body.recurrence ?? 'none', body.reminderAt || null,
     body.sortOrder ?? 0,
   ).first<{ id: number }>();
   if (body.subtasks?.length) await replaceSubtasks(c.env.mymanager_db, result!.id, body.subtasks);
@@ -116,19 +122,32 @@ api.patch('/items/:id', async (c) => {
   const current = await db.prepare('SELECT * FROM items WHERE id = ?').bind(id).first<ItemRow>();
   if (!current) return c.json({ error: '項目が見つかりません。' }, 404);
 
-  const status = body.status ?? current.status;
+  let status = (body.status ?? current.status) as ItemStatus;
+  let progress = (body.progress ?? current.progress ?? (status === 'done' ? 'done' : 'not_started')) as TaskProgress;
+  if (!['not_started', 'in_progress', 'done'].includes(progress)) progress = status === 'done' ? 'done' : 'not_started';
+  if (body.status === 'done' && body.progress === undefined) progress = 'done';
+  if (body.status === 'open' && body.progress === undefined && progress === 'done') progress = 'not_started';
+  if (body.progress !== undefined) status = progress === 'done' ? 'done' : 'open';
   const title = body.title === undefined ? String(current.title) : body.title.trim();
   if (!title) return c.json({ error: 'タイトルは必須です。' }, 400);
   const recurrence = (body.recurrence ?? current.recurrence) as Recurrence;
+  const timePattern = /^([01]\d|2[0-3]):[0-5]\d$/;
+  const allDay = body.allDay === undefined ? Boolean(current.all_day ?? 1) : body.allDay;
+  const rawStartTime = body.startTime === undefined ? current.start_time : body.startTime;
+  const rawEndTime = body.endTime === undefined ? current.end_time : body.endTime;
+  const startTime = !allDay && timePattern.test(String(rawStartTime ?? '')) ? String(rawStartTime) : null;
+  const endTime = !allDay && timePattern.test(String(rawEndTime ?? '')) ? String(rawEndTime) : null;
 
   await db.prepare(
-    `UPDATE items SET title = ?, note = ?, kind = ?, status = ?, priority = ?, due_date = ?, category_id = ?,
+    `UPDATE items SET title = ?, note = ?, kind = ?, status = ?, progress = ?, priority = ?, due_date = ?,
+      all_day = ?, start_time = ?, end_time = ?, category_id = ?,
       project_id = ?, recurrence = ?, reminder_at = ?, sort_order = ?, updated_at = datetime('now'),
       completed_at = CASE WHEN ? = 'done' THEN COALESCE(completed_at, datetime('now')) ELSE NULL END
      WHERE id = ?`,
   ).bind(
-    title, body.note ?? current.note, body.kind ?? current.kind, status, body.priority ?? current.priority,
+    title, body.note ?? current.note, body.kind ?? current.kind, status, progress, body.priority ?? current.priority,
     body.dueDate === undefined ? current.due_date : body.dueDate || null,
+    allDay ? 1 : 0, startTime, endTime,
     body.categoryId === undefined ? current.category_id : body.categoryId || null,
     body.projectId === undefined ? current.project_id : body.projectId || null,
     recurrence,
@@ -143,10 +162,11 @@ api.patch('/items/:id', async (c) => {
   if (status === 'done' && current.status === 'open' && recurrence !== 'none') {
     const dueDate = nextDate(body.dueDate === undefined ? current.due_date : body.dueDate, recurrence);
     const inserted = await db.prepare(
-      `INSERT INTO items (title, note, kind, priority, due_date, category_id, project_id, recurrence, reminder_at, sort_order, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, datetime('now')) RETURNING id`,
+      `INSERT INTO items (title, note, kind, progress, priority, due_date, all_day, start_time, end_time, category_id, project_id, recurrence, reminder_at, sort_order, updated_at)
+       VALUES (?, ?, ?, 'not_started', ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, datetime('now')) RETURNING id`,
     ).bind(
       title, body.note ?? current.note, body.kind ?? current.kind, body.priority ?? current.priority, dueDate,
+      allDay ? 1 : 0, startTime, endTime,
       body.categoryId === undefined ? current.category_id : body.categoryId || null,
       body.projectId === undefined ? current.project_id : body.projectId || null,
       recurrence, body.sortOrder ?? current.sort_order,
@@ -362,17 +382,36 @@ api.patch('/push/preferences', async (c) => {
   return c.json({ updated: true });
 });
 
+api.get('/daily-plans/:date', async (c) => {
+  const date = c.req.param('date');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: 'Invalid date' }, 400);
+  const plan = await c.env.mymanager_db.prepare('SELECT date, content, updated_at AS updatedAt FROM daily_plans WHERE date = ?').bind(date).first();
+  return c.json(plan ?? { date, content: '', updatedAt: '' });
+});
+
+api.put('/daily-plans/:date', async (c) => {
+  const date = c.req.param('date');
+  const body = await c.req.json<{ content?: string }>();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return c.json({ error: 'Invalid date' }, 400);
+  const content = String(body.content ?? '').slice(0, 5000);
+  await c.env.mymanager_db.prepare(`INSERT INTO daily_plans (date, content, updated_at) VALUES (?, ?, datetime('now'))
+    ON CONFLICT(date) DO UPDATE SET content = excluded.content, updated_at = datetime('now')`).bind(date, content).run();
+  const plan = await c.env.mymanager_db.prepare('SELECT date, content, updated_at AS updatedAt FROM daily_plans WHERE date = ?').bind(date).first();
+  return c.json(plan);
+});
+
 api.get('/export', async (c) => {
   const db = c.env.mymanager_db;
-  const [items, categories, projects, subtasks, notes] = await Promise.all([
+  const [items, categories, projects, subtasks, notes, dailyPlans] = await Promise.all([
     db.prepare('SELECT * FROM items ORDER BY id').all(),
     db.prepare('SELECT * FROM categories ORDER BY id').all(),
     db.prepare('SELECT * FROM projects ORDER BY id').all(),
     db.prepare('SELECT * FROM subtasks ORDER BY id').all(),
     db.prepare('SELECT * FROM notes ORDER BY id').all(),
+    db.prepare('SELECT * FROM daily_plans ORDER BY date').all(),
   ]);
   c.header('Content-Disposition', `attachment; filename="mymanager-${new Date().toISOString().slice(0, 10)}.json"`);
-  return c.json({ version: 3, exportedAt: new Date().toISOString(), items: items.results, categories: categories.results, projects: projects.results, subtasks: subtasks.results, notes: notes.results });
+  return c.json({ version: 4, exportedAt: new Date().toISOString(), items: items.results, categories: categories.results, projects: projects.results, subtasks: subtasks.results, notes: notes.results, dailyPlans: dailyPlans.results });
 });
 
 api.post('/import', async (c) => {
@@ -384,7 +423,8 @@ api.post('/import', async (c) => {
   const projects = backup!.projects as ItemRow[];
   const subtasks = (backup!.subtasks ?? []) as ItemRow[];
   const notes = (backup!.notes ?? []) as ItemRow[];
-  if (items.length > 5_000 || categories.length > 1_000 || projects.length > 1_000 || subtasks.length > 25_000 || notes.length > 5_000) {
+  const dailyPlans = (backup!.dailyPlans ?? []) as ItemRow[];
+  if (items.length > 5_000 || categories.length > 1_000 || projects.length > 1_000 || subtasks.length > 25_000 || notes.length > 5_000 || dailyPlans.length > 3_000) {
     return c.json({ error: 'バックアップの件数が上限を超えています。' }, 413);
   }
   if (![...items, ...categories, ...projects, ...subtasks, ...notes].every((row) => row && typeof row === 'object' && Number.isInteger(Number(row.id)))) {
@@ -396,21 +436,22 @@ api.post('/import', async (c) => {
 
   const db = c.env.mymanager_db;
   const statements: D1PreparedStatement[] = [
-    db.prepare('DELETE FROM subtasks'), db.prepare('DELETE FROM items'), db.prepare('DELETE FROM categories'), db.prepare('DELETE FROM projects'), db.prepare('DELETE FROM notes'),
+    db.prepare('DELETE FROM subtasks'), db.prepare('DELETE FROM items'), db.prepare('DELETE FROM categories'), db.prepare('DELETE FROM projects'), db.prepare('DELETE FROM notes'), db.prepare('DELETE FROM daily_plans'),
   ];
   categories.forEach((row) => statements.push(db.prepare('INSERT INTO categories (id, name, color, created_at) VALUES (?, ?, ?, ?)').bind(Number(row.id), String(row.name), String(row.color), String(row.created_at ?? new Date().toISOString()))));
   projects.forEach((row) => statements.push(db.prepare('INSERT INTO projects (id, name, color, archived, created_at) VALUES (?, ?, ?, ?, ?)').bind(Number(row.id), String(row.name), String(row.color), Number(row.archived ?? 0), String(row.created_at ?? new Date().toISOString()))));
   items.forEach((row) => statements.push(db.prepare(`INSERT INTO items
-    (id, title, note, kind, status, priority, due_date, category_id, created_at, completed_at, project_id, recurrence, reminder_at, sort_order, updated_at, deleted_at, notification_sent_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
-    Number(row.id), String(row.title), String(row.note ?? ''), String(row.kind), String(row.status ?? 'open'), String(row.priority ?? 'medium'),
-    row.due_date ?? null, row.category_id ?? null, String(row.created_at ?? new Date().toISOString()), row.completed_at ?? null,
+    (id, title, note, kind, status, progress, priority, due_date, all_day, start_time, end_time, category_id, created_at, completed_at, project_id, recurrence, reminder_at, sort_order, updated_at, deleted_at, notification_sent_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(
+    Number(row.id), String(row.title), String(row.note ?? ''), String(row.kind), String(row.status ?? 'open'), String(row.progress ?? (row.status === 'done' ? 'done' : 'not_started')), String(row.priority ?? 'medium'),
+    row.due_date ?? null, Number(row.all_day ?? 1), row.start_time ?? null, row.end_time ?? null, row.category_id ?? null, String(row.created_at ?? new Date().toISOString()), row.completed_at ?? null,
     row.project_id ?? null, String(row.recurrence ?? 'none'), row.reminder_at ?? null, Number(row.sort_order ?? 0), row.updated_at ?? null, row.deleted_at ?? null, row.notification_sent_at ?? null,
   )));
   subtasks.forEach((row) => statements.push(db.prepare('INSERT INTO subtasks (id, item_id, title, completed, sort_order, created_at, due_date) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(Number(row.id), Number(row.item_id), String(row.title), Number(row.completed ?? 0), Number(row.sort_order ?? 0), String(row.created_at ?? new Date().toISOString()), row.due_date ?? null)));
   notes.forEach((row) => statements.push(db.prepare('INSERT INTO notes (id, title, content, color, pinned, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(Number(row.id), String(row.title), String(row.content ?? ''), String(row.color ?? 'sage'), Number(row.pinned ?? 0), String(row.created_at ?? new Date().toISOString()), String(row.updated_at ?? new Date().toISOString()))));
+  dailyPlans.forEach((row) => statements.push(db.prepare('INSERT INTO daily_plans (date, content, updated_at) VALUES (?, ?, ?)').bind(String(row.date), String(row.content ?? ''), String(row.updated_at ?? new Date().toISOString()))));
   await db.batch(statements);
-  return c.json({ imported: { items: items.length, categories: categories.length, projects: projects.length, subtasks: subtasks.length, notes: notes.length } });
+  return c.json({ imported: { items: items.length, categories: categories.length, projects: projects.length, subtasks: subtasks.length, notes: notes.length, dailyPlans: dailyPlans.length } });
 });
 
 api.onError((error, c) => {

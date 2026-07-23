@@ -1,5 +1,6 @@
 export type ItemKind = 'task' | 'wish';
 export type ItemStatus = 'open' | 'done';
+export type TaskProgress = 'not_started' | 'in_progress' | 'done';
 export type Priority = 'low' | 'medium' | 'high';
 export type Recurrence = 'none' | 'daily' | 'weekly' | 'monthly';
 
@@ -43,8 +44,12 @@ export interface Item {
   note: string;
   kind: ItemKind;
   status: ItemStatus;
+  progress: TaskProgress;
   priority: Priority;
   dueDate: string | null;
+  allDay: number;
+  startTime: string | null;
+  endTime: string | null;
   categoryId: number | null;
   categoryName: string | null;
   categoryColor: string | null;
@@ -77,8 +82,12 @@ export interface ItemInput {
   title: string;
   note?: string;
   kind: ItemKind;
+  progress?: TaskProgress;
   priority?: Priority;
   dueDate?: string | null;
+  allDay?: boolean;
+  startTime?: string | null;
+  endTime?: string | null;
   categoryId?: number | null;
   projectId?: number | null;
   recurrence?: Recurrence;
@@ -90,4 +99,10 @@ export interface ItemInput {
 export interface ItemUpdateResult {
   item: Item;
   nextItem: Item | null;
+}
+
+export interface DailyPlan {
+  date: string;
+  content: string;
+  updatedAt: string;
 }
