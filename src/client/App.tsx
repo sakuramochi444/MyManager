@@ -907,6 +907,7 @@ function CustomListCard({ list, onUpdate, onDelete, onAddItem, onUpdateItem, onD
   const [name, setName] = useState(list.name);
   const [color, setColor] = useState(list.color);
   const [newItem, setNewItem] = useState('');
+  const [collapsed, setCollapsed] = useState(false);
   const done = list.items.filter((item) => item.completed).length;
 
   useEffect(() => { setName(list.name); setColor(list.color); }, [list.color, list.name]);
@@ -925,12 +926,14 @@ function CustomListCard({ list, onUpdate, onDelete, onAddItem, onUpdateItem, onD
     setNewItem('');
   }
 
-  return <article className="custom-list-card" style={{ '--list-color': list.color } as React.CSSProperties}>
-    {editing ? <form className="custom-list-edit" onSubmit={saveList}><input type="color" value={color} onChange={(event) => setColor(event.target.value)} /><input value={name} onChange={(event) => setName(event.target.value)} maxLength={120} /><button disabled={!name.trim()}><Save size={14} /></button></form> : <header><span className="list-color-dot" /><div><h2>{list.name}</h2><small>{done}/{list.items.length} 完了</small></div><button onClick={() => setEditing(true)} aria-label="リスト名を編集"><Edit3 size={14} /></button><button onClick={() => void onDelete(list)} aria-label="リストを削除"><Trash2 size={14} /></button></header>}
-    <div className="custom-list-items">
-      {list.items.map((item) => <div key={item.id} className={item.completed ? 'done' : ''}><button onClick={() => void onUpdateItem(item.id, { completed: !item.completed })}><i>{Boolean(item.completed) && <Check size={11} />}</i></button><input defaultValue={item.title} onBlur={(event) => { const value = event.target.value.trim(); if (value && value !== item.title) void onUpdateItem(item.id, { title: value }); }} /><button className="inline-subtask-delete" onClick={() => void onDeleteItem(item.id)}><X size={13} /></button></div>)}
-    </div>
-    <form className="custom-list-add" onSubmit={addItem}><Plus size={14} /><input value={newItem} onChange={(event) => setNewItem(event.target.value)} placeholder="項目を追加…" maxLength={240} /><button disabled={!newItem.trim()}>追加</button></form>
+  return <article className={`custom-list-card ${collapsed ? 'custom-list-card--collapsed' : ''}`} style={{ '--list-color': list.color } as React.CSSProperties}>
+    {editing ? <form className="custom-list-edit" onSubmit={saveList}><input type="color" value={color} onChange={(event) => setColor(event.target.value)} /><input value={name} onChange={(event) => setName(event.target.value)} maxLength={120} /><button disabled={!name.trim()}><Save size={14} /></button></form> : <header><button className="custom-list-toggle" onClick={() => setCollapsed((value) => !value)} aria-label={collapsed ? 'リストを開く' : 'リストを閉じる'} aria-expanded={!collapsed}><ChevronDown size={15} /></button><span className="list-color-dot" /><div><h2>{list.name}</h2><small>{done}/{list.items.length} 完了</small></div><button onClick={() => setEditing(true)} aria-label="リスト名を編集"><Edit3 size={14} /></button><button onClick={() => void onDelete(list)} aria-label="リストを削除"><Trash2 size={14} /></button></header>}
+    {!collapsed && <>
+      <div className="custom-list-items">
+        {list.items.map((item) => <div key={item.id} className={item.completed ? 'done' : ''}><button onClick={() => void onUpdateItem(item.id, { completed: !item.completed })}><i>{Boolean(item.completed) && <Check size={11} />}</i></button><input defaultValue={item.title} onBlur={(event) => { const value = event.target.value.trim(); if (value && value !== item.title) void onUpdateItem(item.id, { title: value }); }} /><button className="inline-subtask-delete" onClick={() => void onDeleteItem(item.id)}><X size={13} /></button></div>)}
+      </div>
+      <form className="custom-list-add" onSubmit={addItem}><Plus size={14} /><input value={newItem} onChange={(event) => setNewItem(event.target.value)} placeholder="項目を追加…" maxLength={240} /><button disabled={!newItem.trim()}>追加</button></form>
+    </>}
   </article>;
 }
 
