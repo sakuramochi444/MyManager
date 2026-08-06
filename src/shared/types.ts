@@ -38,6 +38,30 @@ export interface NoteInput {
   pinned?: boolean;
 }
 
+export interface CustomListItem {
+  id: number;
+  listId: number;
+  title: string;
+  completed: number;
+  sortOrder: number;
+  createdAt: string;
+}
+
+export interface CustomList {
+  id: number;
+  name: string;
+  color: string;
+  sortOrder: number;
+  createdAt: string;
+  updatedAt: string;
+  items: CustomListItem[];
+}
+
+export interface CustomListInput {
+  name: string;
+  color?: string;
+}
+
 export interface Item {
   id: number;
   title: string;

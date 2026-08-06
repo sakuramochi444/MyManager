@@ -44,9 +44,9 @@ import {
   Eye,
   X,
 } from 'lucide-react';
-import type { Category, DailyPlan, Item, ItemInput, ItemKind, ItemUpdateResult, Note, NoteColor, NoteInput, Priority, Project, Recurrence, SubtaskInput, TaskProgress } from '../shared/types';
+import type { Category, CustomList, DailyPlan, Item, ItemInput, ItemKind, ItemUpdateResult, Note, NoteColor, NoteInput, Priority, Project, Recurrence, SubtaskInput, TaskProgress } from '../shared/types';
 
-type View = 'dashboard' | 'calendar' | 'today' | 'upcoming' | 'overdue' | 'tasks' | 'wishes' | 'notes' | 'done' | 'trash' | 'settings';
+type View = 'dashboard' | 'calendar' | 'today' | 'upcoming' | 'overdue' | 'tasks' | 'wishes' | 'notes' | 'lists' | 'done' | 'trash' | 'settings';
 type Sort = 'smart' | 'due' | 'priority' | 'created';
 type Accent = 'sage' | 'blue' | 'terracotta';
 type Density = 'comfortable' | 'compact';
@@ -76,6 +76,7 @@ const views: { id: View; label: string; icon: typeof Circle }[] = [
   { id: 'tasks', label: 'すべてのタスク', icon: LayoutList },
   { id: 'wishes', label: 'やりたいこと', icon: Sparkles },
   { id: 'notes', label: 'メモ', icon: StickyNote },
+  { id: 'lists', label: 'リスト', icon: ListChecks },
   { id: 'done', label: '完了済み', icon: CheckCircle2 },
   { id: 'trash', label: 'ゴミ箱', icon: Trash2 },
   { id: 'settings', label: '設定', icon: SettingsIcon },
@@ -90,6 +91,7 @@ const viewCopy: Record<View, { title: string; subtitle: string }> = {
   tasks: { title: 'すべてのタスク', subtitle: '予定していることをまとめて確認できます。' },
   wishes: { title: 'やりたいこと', subtitle: 'いつか叶えたいことを、忘れない場所へ。' },
   notes: { title: 'メモ', subtitle: '考えやアイデアを、すぐに書き留めておけます。' },
+  lists: { title: 'リスト', subtitle: '買い物、持ち物、読みたい本など、自由なチェックリストを作れます。' },
   done: { title: '完了済み', subtitle: '積み重ねてきた成果です。' },
   trash: { title: 'ゴミ箱', subtitle: '削除した項目を復元したり、完全に削除できます。' },
   settings: { title: '設定', subtitle: '自分の使い方に合わせて、MyManagerを整えます。' },
@@ -147,6 +149,7 @@ export function App() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
+  const [customLists, setCustomLists] = useState<CustomList[]>([]);
   const [dailyPlan, setDailyPlan] = useState<DailyPlan>({ date: localDate(), content: '', updatedAt: '' });
   const [view, setView] = useState<View>(() => loadPreferences().defaultView);
   const [query, setQuery] = useState('');
@@ -168,13 +171,14 @@ export function App() {
   const draggedItemId = useRef<number | null>(null);
 
   useEffect(() => {
-    Promise.all([request<Item[]>('/api/items'), request<Item[]>('/api/trash'), request<Category[]>('/api/categories'), request<Project[]>('/api/projects'), request<Note[]>('/api/notes')])
-      .then(([nextItems, nextTrash, nextCategories, nextProjects, nextNotes]) => {
+    Promise.all([request<Item[]>('/api/items'), request<Item[]>('/api/trash'), request<Category[]>('/api/categories'), request<Project[]>('/api/projects'), request<Note[]>('/api/notes'), request<CustomList[]>('/api/lists')])
+      .then(([nextItems, nextTrash, nextCategories, nextProjects, nextNotes, nextLists]) => {
         setItems(nextItems);
         setTrashedItems(nextTrash);
         setCategories(nextCategories);
         setProjects(nextProjects);
         setNotes(nextNotes);
+        setCustomLists(nextLists);
       })
       .catch((reason: Error) => setError(reason.message))
       .finally(() => setLoading(false));
@@ -254,10 +258,11 @@ export function App() {
     tasks: items.filter((item) => item.status === 'open' && item.kind === 'task').length,
     wishes: items.filter((item) => item.status === 'open' && item.kind === 'wish').length,
     notes: notes.length,
+    lists: customLists.length,
     done: items.filter((item) => item.status === 'done').length,
     trash: trashedItems.length,
     settings: 0,
-  }), [items, notes, trashedItems]);
+  }), [customLists, items, notes, trashedItems]);
 
   async function createItem(input: ItemInput) {
     try {
@@ -312,6 +317,45 @@ export function App() {
       await request<void>(`/api/notes/${note.id}`, { method: 'DELETE' });
       setNotes((current) => current.filter((candidate) => candidate.id !== note.id));
     } catch (reason) { setError((reason as Error).message); }
+  }
+
+  function replaceList(list: CustomList) {
+    setCustomLists((current) => [list, ...current.filter((candidate) => candidate.id !== list.id)].sort((a, b) => a.sortOrder - b.sortOrder || b.updatedAt.localeCompare(a.updatedAt)));
+  }
+
+  async function createCustomList(name: string, color: string) {
+    try {
+      const list = await request<CustomList>('/api/lists', { method: 'POST', body: JSON.stringify({ name, color }) });
+      setCustomLists((current) => [...current, list].sort((a, b) => a.sortOrder - b.sortOrder));
+    } catch (reason) { setError((reason as Error).message); throw reason; }
+  }
+
+  async function updateCustomList(list: CustomList, input: { name?: string; color?: string }) {
+    try { replaceList(await request<CustomList>(`/api/lists/${list.id}`, { method: 'PATCH', body: JSON.stringify(input) })); }
+    catch (reason) { setError((reason as Error).message); throw reason; }
+  }
+
+  async function deleteCustomList(list: CustomList) {
+    if (!window.confirm(`リスト「${list.name}」を削除しますか？`)) return;
+    try {
+      await request<void>(`/api/lists/${list.id}`, { method: 'DELETE' });
+      setCustomLists((current) => current.filter((candidate) => candidate.id !== list.id));
+    } catch (reason) { setError((reason as Error).message); }
+  }
+
+  async function addCustomListItem(list: CustomList, title: string) {
+    try { replaceList(await request<CustomList>(`/api/lists/${list.id}/items`, { method: 'POST', body: JSON.stringify({ title }) })); }
+    catch (reason) { setError((reason as Error).message); throw reason; }
+  }
+
+  async function updateCustomListItem(itemId: number, input: { title?: string; completed?: boolean }) {
+    try { replaceList(await request<CustomList>(`/api/list-items/${itemId}`, { method: 'PATCH', body: JSON.stringify(input) })); }
+    catch (reason) { setError((reason as Error).message); throw reason; }
+  }
+
+  async function deleteCustomListItem(itemId: number) {
+    try { replaceList(await request<CustomList>(`/api/list-items/${itemId}`, { method: 'DELETE' })); }
+    catch (reason) { setError((reason as Error).message); }
   }
 
   async function updateCategory(category: Category) {
@@ -531,8 +575,8 @@ export function App() {
       URL.revokeObjectURL(link.href);
       const data = JSON.parse(await file.text()) as unknown;
       await request('/api/import', { method: 'POST', body: JSON.stringify(data) });
-      const [nextItems, nextTrash, nextCategories, nextProjects, nextNotes] = await Promise.all([request<Item[]>('/api/items'), request<Item[]>('/api/trash'), request<Category[]>('/api/categories'), request<Project[]>('/api/projects'), request<Note[]>('/api/notes')]);
-      setItems(nextItems); setTrashedItems(nextTrash); setCategories(nextCategories); setProjects(nextProjects); setNotes(nextNotes);
+      const [nextItems, nextTrash, nextCategories, nextProjects, nextNotes, nextLists] = await Promise.all([request<Item[]>('/api/items'), request<Item[]>('/api/trash'), request<Category[]>('/api/categories'), request<Project[]>('/api/projects'), request<Note[]>('/api/notes'), request<CustomList[]>('/api/lists')]);
+      setItems(nextItems); setTrashedItems(nextTrash); setCategories(nextCategories); setProjects(nextProjects); setNotes(nextNotes); setCustomLists(nextLists);
       window.alert('バックアップを復元しました。');
     } catch (reason) { setError(reason instanceof SyntaxError ? 'JSONファイルの形式が正しくありません。' : (reason as Error).message); }
   }
@@ -581,8 +625,8 @@ export function App() {
       <main className="main">
         <header className="topbar">
           <button className="icon-button menu-button" onClick={() => setSidebarOpen(true)} aria-label="メニュー"><Menu size={21} /></button>
-          {!['settings', 'dashboard', 'calendar', 'trash', 'notes'].includes(view) ? <div className="search-wrap"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="タスクを検索..." aria-label="検索" />{query && <button onClick={() => setQuery('')} aria-label="検索をクリア"><X size={15} /></button>}</div> : <div className="topbar-context">{view === 'settings' ? <SettingsIcon size={17} /> : view === 'calendar' ? <CalendarDays size={17} /> : view === 'trash' ? <Trash2 size={17} /> : view === 'notes' ? <StickyNote size={17} /> : <BarChart3 size={17} />}{view === 'settings' ? '環境設定' : view === 'calendar' ? '月間予定' : view === 'trash' ? '削除済み' : view === 'notes' ? 'アイデアノート' : '全体サマリー'}</div>}
-          {!['settings', 'trash', 'notes'].includes(view) && <div className="top-actions"><a className="export-button" href="/api/export" download title="データを書き出す"><Download size={17} /></a><button className="add-button" onClick={() => openNew()}><Plus size={18} /><span>新しく追加</span></button></div>}
+          {!['settings', 'dashboard', 'calendar', 'trash', 'notes', 'lists'].includes(view) ? <div className="search-wrap"><Search size={18} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="タスクを検索..." aria-label="検索" />{query && <button onClick={() => setQuery('')} aria-label="検索をクリア"><X size={15} /></button>}</div> : <div className="topbar-context">{view === 'settings' ? <SettingsIcon size={17} /> : view === 'calendar' ? <CalendarDays size={17} /> : view === 'trash' ? <Trash2 size={17} /> : view === 'notes' ? <StickyNote size={17} /> : view === 'lists' ? <ListChecks size={17} /> : <BarChart3 size={17} />}{view === 'settings' ? '環境設定' : view === 'calendar' ? '月間予定' : view === 'trash' ? '削除済み' : view === 'notes' ? 'アイデアノート' : view === 'lists' ? '自由リスト' : '全体サマリー'}</div>}
+          {!['settings', 'trash', 'notes', 'lists'].includes(view) && <div className="top-actions"><a className="export-button" href="/api/export" download title="データを書き出す"><Download size={17} /></a><button className="add-button" onClick={() => openNew()}><Plus size={18} /><span>新しく追加</span></button></div>}
         </header>
 
         <section className="content">
@@ -591,7 +635,7 @@ export function App() {
             <div className="date-card"><CalendarDays size={18} /><span>{new Intl.DateTimeFormat('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }).format(new Date())}</span></div>
           </div>
 
-          {view === 'dashboard' ? <DashboardPanel items={items} projects={projects} dailyGoal={preferences.dailyGoal} dailyPlan={dailyPlan} onSaveDailyPlan={saveDailyPlan} onNavigate={navigate} onOpen={openDetail} /> : view === 'calendar' ? <CalendarPanel items={items} onAddDate={openNew} onOpen={openDetail} /> : view === 'notes' ? <NotesPanel notes={notes} onSave={saveNote} onDelete={deleteNote} /> : view === 'trash' ? <TrashPanel items={trashedItems} onRestore={restoreTrashItem} onDelete={permanentlyDelete} onEmpty={emptyTrash} /> : view === 'settings' ? <SettingsPanel categories={categories} projects={projects} preferences={preferences} completedCount={counts.done} trashCount={counts.trash} onPreferencesChange={setPreferences} onCreateCategory={createCategory} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onCreateProject={async (name, color) => { await createProject(name, color); }} onUpdateProject={updateProject} onDeleteProject={deleteProject} onClearCompleted={clearCompleted} onOpenTrash={() => navigate('trash')} onRestoreBackup={restoreBackup} /> : <>
+          {view === 'dashboard' ? <DashboardPanel items={items} projects={projects} dailyGoal={preferences.dailyGoal} dailyPlan={dailyPlan} onSaveDailyPlan={saveDailyPlan} onNavigate={navigate} onOpen={openDetail} /> : view === 'calendar' ? <CalendarPanel items={items} onAddDate={openNew} onOpen={openDetail} /> : view === 'notes' ? <NotesPanel notes={notes} onSave={saveNote} onDelete={deleteNote} /> : view === 'lists' ? <ListsPanel lists={customLists} onCreate={createCustomList} onUpdate={updateCustomList} onDelete={deleteCustomList} onAddItem={addCustomListItem} onUpdateItem={updateCustomListItem} onDeleteItem={deleteCustomListItem} /> : view === 'trash' ? <TrashPanel items={trashedItems} onRestore={restoreTrashItem} onDelete={permanentlyDelete} onEmpty={emptyTrash} /> : view === 'settings' ? <SettingsPanel categories={categories} projects={projects} preferences={preferences} completedCount={counts.done} trashCount={counts.trash} onPreferencesChange={setPreferences} onCreateCategory={createCategory} onUpdateCategory={updateCategory} onDeleteCategory={deleteCategory} onCreateProject={async (name, color) => { await createProject(name, color); }} onUpdateProject={updateProject} onDeleteProject={deleteProject} onClearCompleted={clearCompleted} onOpenTrash={() => navigate('trash')} onRestoreBackup={restoreBackup} /> : <>
           <div className="summary-strip" aria-label="進捗サマリー">
             <button onClick={() => navigate('today')}><span>今日</span><strong>{counts.today}</strong></button>
             <button onClick={() => navigate('upcoming')}><span>今後7日</span><strong>{counts.upcoming}</strong></button>
@@ -615,7 +659,7 @@ export function App() {
       </main>
 
       <nav className="bottom-nav" aria-label="スマートフォン用メニュー">
-        {views.filter(({ id }) => ['dashboard', 'today', 'tasks', 'notes', 'wishes', 'settings'].includes(id)).map(({ id, label, icon: Icon }) => (
+        {views.filter(({ id }) => ['dashboard', 'today', 'tasks', 'lists', 'notes', 'settings'].includes(id)).map(({ id, label, icon: Icon }) => (
           <button key={id} className={view === id ? 'active' : ''} onClick={() => navigate(id)} aria-current={view === id ? 'page' : undefined}>
             <span className="bottom-nav-icon"><Icon size={20} strokeWidth={1.8} />{counts[id] > 0 && <i>{counts[id] > 99 ? '99+' : counts[id]}</i>}</span>
             <span>{id === 'tasks' ? 'タスク' : id === 'wishes' ? 'やりたい' : id === 'upcoming' ? '予定' : label}</span>
@@ -623,7 +667,7 @@ export function App() {
         ))}
       </nav>
 
-      {!['settings', 'trash', 'notes'].includes(view) && <button className="mobile-fab" onClick={() => openNew()} aria-label="新しい項目を追加"><Plus size={24} /></button>}
+      {!['settings', 'trash', 'notes', 'lists'].includes(view) && <button className="mobile-fab" onClick={() => openNew()} aria-label="新しい項目を追加"><Plus size={24} /></button>}
       {detailItem && <TaskDetailModal item={detailItem} onClose={() => setDetailItem(null)} onEdit={openEdit} onToggle={toggleItem} onUpdateProgress={updateItemProgress} />}
       {composerOpen && <Composer categories={categories} projects={projects} initialItem={editingItem} defaultKind={view === 'wishes' ? 'wish' : 'task'} defaultDate={composerDate ?? (view === 'today' ? localDate() : null)} onClose={() => { setComposerOpen(false); setEditingItem(null); setComposerDate(null); }} onSubmit={editingItem ? updateItem : createItem} onCreateProject={createProject} />}
       {undoNotice && <div className="undo-toast" role="status"><span>{undoNotice.message}</span><button onClick={performUndo}><Undo2 size={15} />元に戻す</button></div>}
@@ -805,6 +849,10 @@ function NotesPanel({ notes, onSave, onDelete }: { notes: Note[]; onSave: (input
     setEditing(note ?? null); setCreating(!note); setTitle(note?.title ?? ''); setContent(note?.content ?? ''); setColor(note?.color ?? 'sage');
   }
 
+  function addLayout(prefix: string) {
+    setContent((current) => `${current}${current && !current.endsWith('\n') ? '\n' : ''}${prefix}`);
+  }
+
   async function submit(event: React.FormEvent) {
     event.preventDefault(); if (!title.trim()) return; setSaving(true);
     try { await onSave({ title, content, color, pinned: Boolean(editing?.pinned) }, editing?.id); setEditing(null); setCreating(false); }
@@ -813,9 +861,77 @@ function NotesPanel({ notes, onSave, onDelete }: { notes: Note[]; onSave: (input
 
   return <div className="notes-view">
     <div className="notes-toolbar"><div className="notes-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="メモを検索…" /></div><button onClick={() => open()}><Plus size={16} />新しいメモ</button></div>
-    {filtered.length ? <div className="notes-grid">{filtered.map((note) => <article className={`note-card note-${note.color}`} key={note.id} onClick={() => open(note)}><button className={note.pinned ? 'pinned' : ''} onClick={(event) => { event.stopPropagation(); void onSave({ pinned: !note.pinned, title: note.title }, note.id); }} title={note.pinned ? '固定を解除' : '上部に固定'}><Pin size={14} /></button><h2>{note.title}</h2><p>{note.content || '本文はありません'}</p><footer><span>{new Intl.DateTimeFormat('ja-JP', { month: 'short', day: 'numeric' }).format(new Date(note.updatedAt.replace(' ', 'T') + 'Z'))}</span><button onClick={(event) => { event.stopPropagation(); void onDelete(note); }}><Trash2 size={14} /></button></footer></article>)}</div> : <div className="notes-empty"><StickyNote size={28} /><h2>{query ? 'メモが見つかりません' : '最初のメモを書いてみましょう'}</h2><p>アイデア、記録、あとで考えたいことを自由に残せます。</p>{!query && <button onClick={() => open()}><Plus size={15} />メモを作成</button>}</div>}
-    {(creating || editing) && <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) { setCreating(false); setEditing(null); } }}><form className="note-editor" onSubmit={submit}><div className="composer-header"><div><p className="eyebrow">NOTE</p><h2>{editing ? 'メモを編集' : '新しいメモ'}</h2></div><button type="button" className="icon-button" onClick={() => { setCreating(false); setEditing(null); }}><X size={20} /></button></div><input className="note-title-input" autoFocus value={title} onChange={(event) => setTitle(event.target.value)} maxLength={200} placeholder="タイトル" /><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="考えていることを書き留める…" rows={12} /><div className="note-colors">{(['sage', 'blue', 'amber', 'rose'] as NoteColor[]).map((value) => <button type="button" key={value} className={`${value} ${color === value ? 'active' : ''}`} onClick={() => setColor(value)} aria-label={`${value}色`} />)}</div><div className="composer-actions"><button type="button" className="secondary-button" onClick={() => { setCreating(false); setEditing(null); }}>キャンセル</button><button className="primary-button" disabled={!title.trim() || saving}>{saving ? '保存中…' : '保存'}</button></div></form></div>}
+    {filtered.length ? <div className="notes-grid">{filtered.map((note) => <article className={`note-card note-${note.color}`} key={note.id} onClick={() => open(note)}><button className={note.pinned ? 'pinned' : ''} onClick={(event) => { event.stopPropagation(); void onSave({ pinned: !note.pinned, title: note.title }, note.id); }} title={note.pinned ? '固定を解除' : '上部に固定'}><Pin size={14} /></button><h2>{note.title}</h2><NotePreview text={note.content} /><footer><span>{new Intl.DateTimeFormat('ja-JP', { month: 'short', day: 'numeric' }).format(new Date(note.updatedAt.replace(' ', 'T') + 'Z'))}</span><button onClick={(event) => { event.stopPropagation(); void onDelete(note); }}><Trash2 size={14} /></button></footer></article>)}</div> : <div className="notes-empty"><StickyNote size={28} /><h2>{query ? 'メモが見つかりません' : '最初のメモを書いてみましょう'}</h2><p>アイデア、記録、あとで考えたいことを自由に残せます。</p>{!query && <button onClick={() => open()}><Plus size={15} />メモを作成</button>}</div>}
+    {(creating || editing) && <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) { setCreating(false); setEditing(null); } }}><form className="note-editor" onSubmit={submit}><div className="composer-header"><div><p className="eyebrow">NOTE</p><h2>{editing ? 'メモを編集' : '新しいメモ'}</h2></div><button type="button" className="icon-button" onClick={() => { setCreating(false); setEditing(null); }}><X size={20} /></button></div><input className="note-title-input" autoFocus value={title} onChange={(event) => setTitle(event.target.value)} maxLength={200} placeholder="タイトル" /><div className="note-tools note-tools--editor" aria-label="メモのレイアウト"><button type="button" onClick={() => addLayout('# 見出し')}>見出し</button><button type="button" onClick={() => addLayout('- 箇条書き')}>箇条書き</button><button type="button" onClick={() => addLayout('1. 番号リスト')}>番号</button></div><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="考えていることを書き留める…" rows={12} /><div className="note-colors">{(['sage', 'blue', 'amber', 'rose'] as NoteColor[]).map((value) => <button type="button" key={value} className={`${value} ${color === value ? 'active' : ''}`} onClick={() => setColor(value)} aria-label={`${value}色`} />)}</div><div className="composer-actions"><button type="button" className="secondary-button" onClick={() => { setCreating(false); setEditing(null); }}>キャンセル</button><button className="primary-button" disabled={!title.trim() || saving}>{saving ? '保存中…' : '保存'}</button></div></form></div>}
   </div>;
+}
+
+function ListsPanel({ lists, onCreate, onUpdate, onDelete, onAddItem, onUpdateItem, onDeleteItem }: {
+  lists: CustomList[];
+  onCreate: (name: string, color: string) => Promise<void>;
+  onUpdate: (list: CustomList, input: { name?: string; color?: string }) => Promise<void>;
+  onDelete: (list: CustomList) => Promise<void>;
+  onAddItem: (list: CustomList, title: string) => Promise<void>;
+  onUpdateItem: (itemId: number, input: { title?: string; completed?: boolean }) => Promise<void>;
+  onDeleteItem: (itemId: number) => Promise<void>;
+}) {
+  const [name, setName] = useState('');
+  const [color, setColor] = useState('#657153');
+
+  async function create(event: React.FormEvent) {
+    event.preventDefault();
+    if (!name.trim()) return;
+    await onCreate(name, color);
+    setName('');
+  }
+
+  return <div className="lists-view">
+    <form className="list-create" onSubmit={create}>
+      <input type="color" value={color} onChange={(event) => setColor(event.target.value)} aria-label="リスト色" />
+      <input value={name} onChange={(event) => setName(event.target.value)} placeholder="新しいリスト名（例：買い物リスト）" maxLength={120} />
+      <button disabled={!name.trim()}><Plus size={16} />リスト作成</button>
+    </form>
+    {lists.length ? <div className="custom-list-grid">{lists.map((list) => <CustomListCard key={list.id} list={list} onUpdate={onUpdate} onDelete={onDelete} onAddItem={onAddItem} onUpdateItem={onUpdateItem} onDeleteItem={onDeleteItem} />)}</div> : <div className="notes-empty"><ListChecks size={29} /><h2>自由リストを作ってみましょう</h2><p>買い物、持ち物、見たい作品などをチェックリスト化できます。</p></div>}
+  </div>;
+}
+
+function CustomListCard({ list, onUpdate, onDelete, onAddItem, onUpdateItem, onDeleteItem }: {
+  list: CustomList;
+  onUpdate: (list: CustomList, input: { name?: string; color?: string }) => Promise<void>;
+  onDelete: (list: CustomList) => Promise<void>;
+  onAddItem: (list: CustomList, title: string) => Promise<void>;
+  onUpdateItem: (itemId: number, input: { title?: string; completed?: boolean }) => Promise<void>;
+  onDeleteItem: (itemId: number) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(list.name);
+  const [color, setColor] = useState(list.color);
+  const [newItem, setNewItem] = useState('');
+  const done = list.items.filter((item) => item.completed).length;
+
+  useEffect(() => { setName(list.name); setColor(list.color); }, [list.color, list.name]);
+
+  async function saveList(event: React.FormEvent) {
+    event.preventDefault();
+    if (!name.trim()) return;
+    await onUpdate(list, { name, color });
+    setEditing(false);
+  }
+
+  async function addItem(event: React.FormEvent) {
+    event.preventDefault();
+    if (!newItem.trim()) return;
+    await onAddItem(list, newItem);
+    setNewItem('');
+  }
+
+  return <article className="custom-list-card" style={{ '--list-color': list.color } as React.CSSProperties}>
+    {editing ? <form className="custom-list-edit" onSubmit={saveList}><input type="color" value={color} onChange={(event) => setColor(event.target.value)} /><input value={name} onChange={(event) => setName(event.target.value)} maxLength={120} /><button disabled={!name.trim()}><Save size={14} /></button></form> : <header><span className="list-color-dot" /><div><h2>{list.name}</h2><small>{done}/{list.items.length} 完了</small></div><button onClick={() => setEditing(true)} aria-label="リスト名を編集"><Edit3 size={14} /></button><button onClick={() => void onDelete(list)} aria-label="リストを削除"><Trash2 size={14} /></button></header>}
+    <div className="custom-list-items">
+      {list.items.map((item) => <div key={item.id} className={item.completed ? 'done' : ''}><button onClick={() => void onUpdateItem(item.id, { completed: !item.completed })}><i>{Boolean(item.completed) && <Check size={11} />}</i></button><input defaultValue={item.title} onBlur={(event) => { const value = event.target.value.trim(); if (value && value !== item.title) void onUpdateItem(item.id, { title: value }); }} /><button className="inline-subtask-delete" onClick={() => void onDeleteItem(item.id)}><X size={13} /></button></div>)}
+    </div>
+    <form className="custom-list-add" onSubmit={addItem}><Plus size={14} /><input value={newItem} onChange={(event) => setNewItem(event.target.value)} placeholder="項目を追加…" maxLength={240} /><button disabled={!newItem.trim()}>追加</button></form>
+  </article>;
 }
 
 function TrashPanel({ items, onRestore, onDelete, onEmpty }: { items: Item[]; onRestore: (item: Item) => Promise<void>; onDelete: (item: Item) => Promise<void>; onEmpty: () => Promise<void> }) {
@@ -928,7 +1044,7 @@ function SettingsPanel({ categories, projects, preferences, completedCount, tras
     <div className="settings-grid">
       <section className="settings-card">
         <div className="settings-card-heading"><span><Palette size={18} /></span><div><h2>表示</h2><p>見た目と起動時の画面</p></div></div>
-        <div className="setting-field"><label htmlFor="default-view">最初に開く画面</label><select id="default-view" value={preferences.defaultView} onChange={(event) => onPreferencesChange((current) => ({ ...current, defaultView: event.target.value as Preferences['defaultView'] }))}><option value="dashboard">ダッシュボード</option><option value="today">今日</option><option value="upcoming">今後の予定</option><option value="tasks">すべてのタスク</option><option value="wishes">やりたいこと</option><option value="notes">メモ</option><option value="done">完了済み</option></select></div>
+        <div className="setting-field"><label htmlFor="default-view">最初に開く画面</label><select id="default-view" value={preferences.defaultView} onChange={(event) => onPreferencesChange((current) => ({ ...current, defaultView: event.target.value as Preferences['defaultView'] }))}><option value="dashboard">ダッシュボード</option><option value="today">今日</option><option value="upcoming">今後の予定</option><option value="tasks">すべてのタスク</option><option value="wishes">やりたいこと</option><option value="notes">メモ</option><option value="lists">リスト</option><option value="done">完了済み</option></select></div>
         <div className="setting-field"><span>表示密度</span><div className="setting-segments"><button className={preferences.density === 'comfortable' ? 'active' : ''} onClick={() => onPreferencesChange((current) => ({ ...current, density: 'comfortable' }))}>ゆったり</button><button className={preferences.density === 'compact' ? 'active' : ''} onClick={() => onPreferencesChange((current) => ({ ...current, density: 'compact' }))}>コンパクト</button></div></div>
         <div className="setting-field"><span>アクセントカラー</span><div className="accent-options">{(Object.keys(accentColors) as Accent[]).map((accent) => <button key={accent} className={preferences.accent === accent ? 'active' : ''} style={{ background: accentColors[accent].base }} onClick={() => onPreferencesChange((current) => ({ ...current, accent }))} aria-label={accent} />)}</div></div>
         <div className="setting-field"><label htmlFor="daily-goal">1日の完了目標</label><select id="daily-goal" value={preferences.dailyGoal} onChange={(event) => onPreferencesChange((current) => ({ ...current, dailyGoal: Number(event.target.value) }))}>{[1, 3, 5, 8, 10].map((goal) => <option value={goal} key={goal}>{goal}件</option>)}</select></div>

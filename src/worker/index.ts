@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import type { ItemInput, ItemStatus, NoteInput, Recurrence, SubtaskInput, TaskProgress } from '../shared/types';
+import type { CustomListInput, ItemInput, ItemStatus, NoteInput, Recurrence, SubtaskInput, TaskProgress } from '../shared/types';
 
 type Bindings = { mymanager_db: D1Database; VAPID_PRIVATE_JWK?: string; VAPID_SUBJECT?: string };
 type ItemRow = Record<string, unknown>;
@@ -81,6 +81,17 @@ async function getItems(db: D1Database, deleted: boolean) {
     subtasksByItem.set(itemId, [...(subtasksByItem.get(itemId) ?? []), subtask]);
   });
   return result.results.map((item) => ({ ...item, subtasks: subtasksByItem.get(Number((item as Record<string, unknown>).id)) ?? [] }));
+}
+
+async function getCustomLists(db: D1Database) {
+  const lists = await db.prepare('SELECT id, name, color, sort_order AS sortOrder, created_at AS createdAt, updated_at AS updatedAt FROM custom_lists ORDER BY sort_order, updated_at DESC').all<Record<string, unknown>>();
+  const items = await db.prepare('SELECT id, list_id AS listId, title, completed, sort_order AS sortOrder, created_at AS createdAt FROM custom_list_items ORDER BY sort_order, id').all<Record<string, unknown>>();
+  const byList = new Map<number, Record<string, unknown>[]>();
+  items.results.forEach((item) => {
+    const listId = Number(item.listId);
+    byList.set(listId, [...(byList.get(listId) ?? []), item]);
+  });
+  return lists.results.map((list) => ({ ...list, items: byList.get(Number(list.id)) ?? [] }));
 }
 
 api.get('/items', async (c) => {
@@ -293,6 +304,72 @@ api.delete('/projects/:id', async (c) => {
   return c.body(null, 204);
 });
 
+api.get('/lists', async (c) => c.json(await getCustomLists(c.env.mymanager_db)));
+
+api.post('/lists', async (c) => {
+  const body = await c.req.json<CustomListInput>();
+  const name = body.name?.trim();
+  const color = /^#[0-9a-f]{6}$/i.test(body.color ?? '') ? body.color! : '#657153';
+  if (!name || name.length > 120) return c.json({ error: 'リスト名を入力してください。' }, 400);
+  const maxOrder = await c.env.mymanager_db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS value FROM custom_lists').first<{ value: number }>();
+  const list = await c.env.mymanager_db.prepare(`INSERT INTO custom_lists (name, color, sort_order) VALUES (?, ?, ?)
+    RETURNING id, name, color, sort_order AS sortOrder, created_at AS createdAt, updated_at AS updatedAt`).bind(name, color, Number(maxOrder?.value ?? -1) + 1).first<Record<string, unknown>>();
+  return c.json({ ...list, items: [] }, 201);
+});
+
+api.patch('/lists/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  const body = await c.req.json<Partial<CustomListInput>>();
+  const current = await c.env.mymanager_db.prepare('SELECT * FROM custom_lists WHERE id = ?').bind(id).first<ItemRow>();
+  if (!Number.isInteger(id) || !current) return c.json({ error: 'リストが見つかりません。' }, 404);
+  const name = body.name === undefined ? String(current.name) : body.name.trim();
+  const color = /^#[0-9a-f]{6}$/i.test(body.color ?? '') ? body.color! : String(current.color);
+  if (!name || name.length > 120) return c.json({ error: 'リスト名を入力してください。' }, 400);
+  await c.env.mymanager_db.prepare("UPDATE custom_lists SET name = ?, color = ?, updated_at = datetime('now') WHERE id = ?").bind(name, color, id).run();
+  return c.json((await getCustomLists(c.env.mymanager_db)).find((list) => Number((list as ItemRow).id) === id));
+});
+
+api.delete('/lists/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  if (!Number.isInteger(id)) return c.json({ error: '不正なIDです。' }, 400);
+  await c.env.mymanager_db.prepare('DELETE FROM custom_lists WHERE id = ?').bind(id).run();
+  return c.body(null, 204);
+});
+
+api.post('/lists/:id/items', async (c) => {
+  const id = Number(c.req.param('id'));
+  const body = await c.req.json<{ title?: string }>();
+  const title = body.title?.trim();
+  if (!Number.isInteger(id) || !title || title.length > 240) return c.json({ error: '項目名を入力してください。' }, 400);
+  const exists = await c.env.mymanager_db.prepare('SELECT id FROM custom_lists WHERE id = ?').bind(id).first();
+  if (!exists) return c.json({ error: 'リストが見つかりません。' }, 404);
+  const maxOrder = await c.env.mymanager_db.prepare('SELECT COALESCE(MAX(sort_order), -1) AS value FROM custom_list_items WHERE list_id = ?').bind(id).first<{ value: number }>();
+  await c.env.mymanager_db.prepare('INSERT INTO custom_list_items (list_id, title, sort_order) VALUES (?, ?, ?)').bind(id, title, Number(maxOrder?.value ?? -1) + 1).run();
+  await c.env.mymanager_db.prepare("UPDATE custom_lists SET updated_at = datetime('now') WHERE id = ?").bind(id).run();
+  return c.json((await getCustomLists(c.env.mymanager_db)).find((list) => Number((list as ItemRow).id) === id), 201);
+});
+
+api.patch('/list-items/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  const body = await c.req.json<{ title?: string; completed?: boolean }>();
+  const current = await c.env.mymanager_db.prepare('SELECT * FROM custom_list_items WHERE id = ?').bind(id).first<ItemRow>();
+  if (!Number.isInteger(id) || !current) return c.json({ error: '項目が見つかりません。' }, 404);
+  const title = body.title === undefined ? String(current.title) : body.title.trim();
+  if (!title || title.length > 240) return c.json({ error: '項目名を入力してください。' }, 400);
+  await c.env.mymanager_db.prepare('UPDATE custom_list_items SET title = ?, completed = ? WHERE id = ?').bind(title, body.completed === undefined ? current.completed : body.completed ? 1 : 0, id).run();
+  await c.env.mymanager_db.prepare("UPDATE custom_lists SET updated_at = datetime('now') WHERE id = ?").bind(current.list_id).run();
+  return c.json((await getCustomLists(c.env.mymanager_db)).find((list) => Number((list as ItemRow).id) === Number(current.list_id)));
+});
+
+api.delete('/list-items/:id', async (c) => {
+  const id = Number(c.req.param('id'));
+  const current = await c.env.mymanager_db.prepare('SELECT * FROM custom_list_items WHERE id = ?').bind(id).first<ItemRow>();
+  if (!Number.isInteger(id) || !current) return c.json({ error: '項目が見つかりません。' }, 404);
+  await c.env.mymanager_db.prepare('DELETE FROM custom_list_items WHERE id = ?').bind(id).run();
+  await c.env.mymanager_db.prepare("UPDATE custom_lists SET updated_at = datetime('now') WHERE id = ?").bind(current.list_id).run();
+  return c.json((await getCustomLists(c.env.mymanager_db)).find((list) => Number((list as ItemRow).id) === Number(current.list_id)));
+});
+
 api.patch('/reorder/items', async (c) => {
   const body = await c.req.json<{ ids?: number[] }>();
   if (!Array.isArray(body.ids) || body.ids.length > 5_000 || !body.ids.every(Number.isInteger)) return c.json({ error: '並び順が正しくありません。' }, 400);
@@ -402,16 +479,18 @@ api.put('/daily-plans/:date', async (c) => {
 
 api.get('/export', async (c) => {
   const db = c.env.mymanager_db;
-  const [items, categories, projects, subtasks, notes, dailyPlans] = await Promise.all([
+  const [items, categories, projects, subtasks, notes, dailyPlans, customLists, customListItems] = await Promise.all([
     db.prepare('SELECT * FROM items ORDER BY id').all(),
     db.prepare('SELECT * FROM categories ORDER BY id').all(),
     db.prepare('SELECT * FROM projects ORDER BY id').all(),
     db.prepare('SELECT * FROM subtasks ORDER BY id').all(),
     db.prepare('SELECT * FROM notes ORDER BY id').all(),
     db.prepare('SELECT * FROM daily_plans ORDER BY date').all(),
+    db.prepare('SELECT * FROM custom_lists ORDER BY id').all(),
+    db.prepare('SELECT * FROM custom_list_items ORDER BY id').all(),
   ]);
   c.header('Content-Disposition', `attachment; filename="mymanager-${new Date().toISOString().slice(0, 10)}.json"`);
-  return c.json({ version: 4, exportedAt: new Date().toISOString(), items: items.results, categories: categories.results, projects: projects.results, subtasks: subtasks.results, notes: notes.results, dailyPlans: dailyPlans.results });
+  return c.json({ version: 5, exportedAt: new Date().toISOString(), items: items.results, categories: categories.results, projects: projects.results, subtasks: subtasks.results, notes: notes.results, dailyPlans: dailyPlans.results, customLists: customLists.results, customListItems: customListItems.results });
 });
 
 api.post('/import', async (c) => {
@@ -424,10 +503,12 @@ api.post('/import', async (c) => {
   const subtasks = (backup!.subtasks ?? []) as ItemRow[];
   const notes = (backup!.notes ?? []) as ItemRow[];
   const dailyPlans = (backup!.dailyPlans ?? []) as ItemRow[];
-  if (items.length > 5_000 || categories.length > 1_000 || projects.length > 1_000 || subtasks.length > 25_000 || notes.length > 5_000 || dailyPlans.length > 3_000) {
+  const customLists = (backup!.customLists ?? []) as ItemRow[];
+  const customListItems = (backup!.customListItems ?? []) as ItemRow[];
+  if (items.length > 5_000 || categories.length > 1_000 || projects.length > 1_000 || subtasks.length > 25_000 || notes.length > 5_000 || dailyPlans.length > 3_000 || customLists.length > 1_000 || customListItems.length > 25_000) {
     return c.json({ error: 'バックアップの件数が上限を超えています。' }, 413);
   }
-  if (![...items, ...categories, ...projects, ...subtasks, ...notes].every((row) => row && typeof row === 'object' && Number.isInteger(Number(row.id)))) {
+  if (![...items, ...categories, ...projects, ...subtasks, ...notes, ...customLists, ...customListItems].every((row) => row && typeof row === 'object' && Number.isInteger(Number(row.id)))) {
     return c.json({ error: 'バックアップのデータ形式が正しくありません。' }, 400);
   }
   if (!items.every((row) => typeof row.title === 'string' && row.title.length > 0 && row.title.length <= 200 && ['task', 'wish'].includes(String(row.kind)))) {
@@ -436,7 +517,7 @@ api.post('/import', async (c) => {
 
   const db = c.env.mymanager_db;
   const statements: D1PreparedStatement[] = [
-    db.prepare('DELETE FROM subtasks'), db.prepare('DELETE FROM items'), db.prepare('DELETE FROM categories'), db.prepare('DELETE FROM projects'), db.prepare('DELETE FROM notes'), db.prepare('DELETE FROM daily_plans'),
+    db.prepare('DELETE FROM custom_list_items'), db.prepare('DELETE FROM custom_lists'), db.prepare('DELETE FROM subtasks'), db.prepare('DELETE FROM items'), db.prepare('DELETE FROM categories'), db.prepare('DELETE FROM projects'), db.prepare('DELETE FROM notes'), db.prepare('DELETE FROM daily_plans'),
   ];
   categories.forEach((row) => statements.push(db.prepare('INSERT INTO categories (id, name, color, created_at) VALUES (?, ?, ?, ?)').bind(Number(row.id), String(row.name), String(row.color), String(row.created_at ?? new Date().toISOString()))));
   projects.forEach((row) => statements.push(db.prepare('INSERT INTO projects (id, name, color, archived, created_at) VALUES (?, ?, ?, ?, ?)').bind(Number(row.id), String(row.name), String(row.color), Number(row.archived ?? 0), String(row.created_at ?? new Date().toISOString()))));
@@ -450,8 +531,10 @@ api.post('/import', async (c) => {
   subtasks.forEach((row) => statements.push(db.prepare('INSERT INTO subtasks (id, item_id, title, completed, sort_order, created_at, due_date) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(Number(row.id), Number(row.item_id), String(row.title), Number(row.completed ?? 0), Number(row.sort_order ?? 0), String(row.created_at ?? new Date().toISOString()), row.due_date ?? null)));
   notes.forEach((row) => statements.push(db.prepare('INSERT INTO notes (id, title, content, color, pinned, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)').bind(Number(row.id), String(row.title), String(row.content ?? ''), String(row.color ?? 'sage'), Number(row.pinned ?? 0), String(row.created_at ?? new Date().toISOString()), String(row.updated_at ?? new Date().toISOString()))));
   dailyPlans.forEach((row) => statements.push(db.prepare('INSERT INTO daily_plans (date, content, updated_at) VALUES (?, ?, ?)').bind(String(row.date), String(row.content ?? ''), String(row.updated_at ?? new Date().toISOString()))));
+  customLists.forEach((row) => statements.push(db.prepare('INSERT INTO custom_lists (id, name, color, sort_order, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').bind(Number(row.id), String(row.name), String(row.color ?? '#657153'), Number(row.sort_order ?? 0), String(row.created_at ?? new Date().toISOString()), String(row.updated_at ?? new Date().toISOString()))));
+  customListItems.forEach((row) => statements.push(db.prepare('INSERT INTO custom_list_items (id, list_id, title, completed, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?)').bind(Number(row.id), Number(row.list_id), String(row.title), Number(row.completed ?? 0), Number(row.sort_order ?? 0), String(row.created_at ?? new Date().toISOString()))));
   await db.batch(statements);
-  return c.json({ imported: { items: items.length, categories: categories.length, projects: projects.length, subtasks: subtasks.length, notes: notes.length, dailyPlans: dailyPlans.length } });
+  return c.json({ imported: { items: items.length, categories: categories.length, projects: projects.length, subtasks: subtasks.length, notes: notes.length, dailyPlans: dailyPlans.length, customLists: customLists.length, customListItems: customListItems.length } });
 });
 
 api.onError((error, c) => {
