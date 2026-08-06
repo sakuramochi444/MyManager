@@ -907,7 +907,7 @@ function CustomListCard({ list, onUpdate, onDelete, onAddItem, onUpdateItem, onD
   const [name, setName] = useState(list.name);
   const [color, setColor] = useState(list.color);
   const [newItem, setNewItem] = useState('');
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
   const done = list.items.filter((item) => item.completed).length;
 
   useEffect(() => { setName(list.name); setColor(list.color); }, [list.color, list.name]);
