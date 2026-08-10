@@ -837,6 +837,7 @@ function DashboardEmpty({ icon, text }: { icon: React.ReactNode; text: string })
 
 function NotesPanel({ notes, onSave, onDelete }: { notes: Note[]; onSave: (input: NoteInput, id?: number) => Promise<void>; onDelete: (note: Note) => Promise<void> }) {
   const [query, setQuery] = useState('');
+  const [previewing, setPreviewing] = useState<Note | null>(null);
   const [editing, setEditing] = useState<Note | null>(null);
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState('');
@@ -845,8 +846,16 @@ function NotesPanel({ notes, onSave, onDelete }: { notes: Note[]; onSave: (input
   const [saving, setSaving] = useState(false);
   const filtered = notes.filter((note) => `${note.title} ${note.content}`.toLocaleLowerCase('ja').includes(query.trim().toLocaleLowerCase('ja')));
 
-  function open(note?: Note) {
-    setEditing(note ?? null); setCreating(!note); setTitle(note?.title ?? ''); setContent(note?.content ?? ''); setColor(note?.color ?? 'sage');
+  function createNew() {
+    setPreviewing(null); setEditing(null); setCreating(true); setTitle(''); setContent(''); setColor('sage');
+  }
+
+  function preview(note: Note) {
+    setPreviewing(note);
+  }
+
+  function edit(note: Note) {
+    setPreviewing(null); setEditing(note); setCreating(false); setTitle(note.title); setContent(note.content); setColor(note.color);
   }
 
   function addLayout(prefix: string) {
@@ -855,13 +864,14 @@ function NotesPanel({ notes, onSave, onDelete }: { notes: Note[]; onSave: (input
 
   async function submit(event: React.FormEvent) {
     event.preventDefault(); if (!title.trim()) return; setSaving(true);
-    try { await onSave({ title, content, color, pinned: Boolean(editing?.pinned) }, editing?.id); setEditing(null); setCreating(false); }
+    try { await onSave({ title, content, color, pinned: Boolean(editing?.pinned) }, editing?.id); setPreviewing(null); setEditing(null); setCreating(false); }
     finally { setSaving(false); }
   }
 
   return <div className="notes-view">
-    <div className="notes-toolbar"><div className="notes-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="メモを検索…" /></div><button onClick={() => open()}><Plus size={16} />新しいメモ</button></div>
-    {filtered.length ? <div className="notes-grid">{filtered.map((note) => <article className={`note-card note-${note.color}`} key={note.id} onClick={() => open(note)}><button className={note.pinned ? 'pinned' : ''} onClick={(event) => { event.stopPropagation(); void onSave({ pinned: !note.pinned, title: note.title }, note.id); }} title={note.pinned ? '固定を解除' : '上部に固定'}><Pin size={14} /></button><h2>{note.title}</h2><NotePreview text={note.content} /><footer><span>{new Intl.DateTimeFormat('ja-JP', { month: 'short', day: 'numeric' }).format(new Date(note.updatedAt.replace(' ', 'T') + 'Z'))}</span><button onClick={(event) => { event.stopPropagation(); void onDelete(note); }}><Trash2 size={14} /></button></footer></article>)}</div> : <div className="notes-empty"><StickyNote size={28} /><h2>{query ? 'メモが見つかりません' : '最初のメモを書いてみましょう'}</h2><p>アイデア、記録、あとで考えたいことを自由に残せます。</p>{!query && <button onClick={() => open()}><Plus size={15} />メモを作成</button>}</div>}
+    <div className="notes-toolbar"><div className="notes-search"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="メモを検索…" /></div><button onClick={createNew}><Plus size={16} />新しいメモ</button></div>
+    {filtered.length ? <div className="notes-grid">{filtered.map((note) => <article className={`note-card note-${note.color}`} key={note.id} onClick={() => preview(note)}><button className={note.pinned ? 'pinned' : ''} onClick={(event) => { event.stopPropagation(); void onSave({ pinned: !note.pinned, title: note.title }, note.id); }} title={note.pinned ? '固定を解除' : '上部に固定'}><Pin size={14} /></button><h2>{note.title}</h2><NotePreview text={note.content} /><footer><span>{new Intl.DateTimeFormat('ja-JP', { month: 'short', day: 'numeric' }).format(new Date(note.updatedAt.replace(' ', 'T') + 'Z'))}</span><button onClick={(event) => { event.stopPropagation(); void onDelete(note); }}><Trash2 size={14} /></button></footer></article>)}</div> : <div className="notes-empty"><StickyNote size={28} /><h2>{query ? 'メモが見つかりません' : '最初のメモを書いてみましょう'}</h2><p>アイデア、記録、あとで考えたいことを自由に残せます。</p>{!query && <button onClick={createNew}><Plus size={15} />メモを作成</button>}</div>}
+    {previewing && <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setPreviewing(null); }}><section className={`note-preview-modal note-${previewing.color}`} role="dialog" aria-modal="true" aria-labelledby="note-preview-title"><div className="composer-header"><div><p className="eyebrow">NOTE PREVIEW</p><h2 id="note-preview-title">{previewing.title}</h2></div><button type="button" className="icon-button" onClick={() => setPreviewing(null)}><X size={20} /></button></div><div className="note-preview-body"><NotePreview text={previewing.content} /></div><footer className="note-preview-footer"><span>{new Intl.DateTimeFormat('ja-JP', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(previewing.updatedAt.replace(' ', 'T') + 'Z'))}</span><div><button type="button" className="secondary-button" onClick={() => setPreviewing(null)}>閉じる</button><button type="button" className="primary-button" onClick={() => edit(previewing)}><Edit3 size={15} />編集</button></div></footer></section></div>}
     {(creating || editing) && <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) { setCreating(false); setEditing(null); } }}><form className="note-editor" onSubmit={submit}><div className="composer-header"><div><p className="eyebrow">NOTE</p><h2>{editing ? 'メモを編集' : '新しいメモ'}</h2></div><button type="button" className="icon-button" onClick={() => { setCreating(false); setEditing(null); }}><X size={20} /></button></div><input className="note-title-input" autoFocus value={title} onChange={(event) => setTitle(event.target.value)} maxLength={200} placeholder="タイトル" /><div className="note-tools note-tools--editor" aria-label="メモのレイアウト"><button type="button" onClick={() => addLayout('# 見出し')}>見出し</button><button type="button" onClick={() => addLayout('- 箇条書き')}>箇条書き</button><button type="button" onClick={() => addLayout('1. 番号リスト')}>番号</button></div><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="考えていることを書き留める…" rows={12} /><div className="note-colors">{(['sage', 'blue', 'amber', 'rose'] as NoteColor[]).map((value) => <button type="button" key={value} className={`${value} ${color === value ? 'active' : ''}`} onClick={() => setColor(value)} aria-label={`${value}色`} />)}</div><div className="composer-actions"><button type="button" className="secondary-button" onClick={() => { setCreating(false); setEditing(null); }}>キャンセル</button><button className="primary-button" disabled={!title.trim() || saving}>{saving ? '保存中…' : '保存'}</button></div></form></div>}
   </div>;
 }
